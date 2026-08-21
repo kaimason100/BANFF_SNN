@@ -1,0 +1,11 @@
+.DS_Store
+**/.DS_Store
+*.asv
+*.autosave
+*.m~
+*.mex*
+**/bin/
+**/outputs/
+outputs/
+*.zip
+Archive*
