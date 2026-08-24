@@ -83,7 +83,6 @@ cfg.spsa_c_start = single(0.75);
 cfg.spsa_c_end = single(0.05);
 cfg.spsa_schedule_epochs = [];
 cfg.learning_rate_schedule_epochs = [];
-cfg.spsa_continuation_boundary = 0;
 
 cfg.presentation_time = single(0.300);
 cfg.average_fraction = single(0.5);
@@ -180,21 +179,15 @@ end
 if cfg.method == "spsa" && cfg.task == "yacht"
     cfg.epochs = value_or_override(overrides, 'epochs', 50000);
 end
+if cfg.method == "spsa" && cfg.task == "breast_cancer"
+    cfg.epochs = value_or_override(overrides, 'epochs', 50000);
+end
 if cfg.method == "spsa" && cfg.task == "vanderpol"
     cfg.epochs = value_or_override(overrides, 'epochs', 200000);
 end
 if cfg.method == "spsa" && cfg.kind == "dynamics"
     cfg.validation_warmup_time = value_or_override( ...
         overrides, 'validation_warmup_time', cfg.test_warmup_time);
-end
-if cfg.method == "spsa" && cfg.task == "breast_cancer" && ...
-        ~isfield(overrides, 'epochs')
-    % Reported experiment: 5k scheduled epochs, then 45k fine-tuning epochs
-    % from the validation-selected phase-one bias with fresh Adam moments.
-    cfg.epochs = 50000;
-    cfg.spsa_schedule_epochs = 5000;
-    cfg.learning_rate_schedule_epochs = 5000;
-    cfg.spsa_continuation_boundary = 5000;
 end
 if cfg.training_profile == "neuron_sweep" && cfg.task == "yacht"
     cfg.epochs = value_or_override(overrides, 'epochs', 25000);
@@ -242,7 +235,7 @@ for i = 1:numel(positiveIntegers)
     end
 end
 nonnegativeIntegers = {'seed','split_seed','training_seed','validation_initial_condition_seed', ...
-    'test_initial_condition_seed','spsa_continuation_boundary'};
+    'test_initial_condition_seed'};
 for i = 1:numel(nonnegativeIntegers)
     value = double(cfg.(nonnegativeIntegers{i}));
     if ~isscalar(value) || ~isfinite(value) || value < 0 || value ~= round(value)
@@ -427,6 +420,11 @@ for index = 1:numel(runtimeFields)
 end
 if ~includeSeed && isfield(clean, 'seed')
     clean = rmfield(clean, 'seed');
+end
+% Preserve hashes of existing one-phase experiments created before the obsolete
+% continuation setting was removed.  The former zero value had no effect.
+if ~isfield(clean, 'spsa_continuation_boundary')
+    clean.spsa_continuation_boundary = 0;
 end
 % Do not let parameters that are inactive in the selected method change the
 % experiment identity.

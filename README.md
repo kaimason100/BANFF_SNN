@@ -142,6 +142,10 @@ cfg = banff("config", "lorenz", struct());
 Supplementary full-rank, SPSA and neuron-sweep overrides are centralised in
 `banff.m` rather than hidden in separate scripts.
 
+The breast-cancer SPSA control is one continuous 50,000-epoch optimisation.
+Its learning-rate and SPSA-perturbation schedules both span all 50,000 epochs;
+the optimiser state is not reset during training.
+
 ## Static-task training semantics
 
 `batch_size=32` is a **GPU memory batch**, not an optimiser minibatch. Gradients

@@ -43,18 +43,6 @@ best = struct('epoch', 0, 'loss', inf, 'metric', -inf, 'B', []);
 runTimer = tic;
 
 for epoch = startEpoch:cfg.epochs
-    if cfg.spsa_continuation_boundary > 0 && ...
-            epoch == cfg.spsa_continuation_boundary + 1
-        if best.epoch == 0
-            error('banff:spsaContinuation', ...
-                'SPSA continuation requires a validation-selected phase-one bias.');
-        end
-        P.B = gpuArray(single(best.B));
-        P.m(:) = 0;
-        P.v(:) = 0;
-        P.vMax(:) = 0;
-        P.adamStep = 0;
-    end
     learningRate = schedule_value(epoch, cfg.learning_rate_schedule_epochs, ...
         cfg.learning_rate_start, cfg.learning_rate_end);
     if cfg.method == "spsa"

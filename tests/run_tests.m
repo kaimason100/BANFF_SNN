@@ -60,6 +60,11 @@ assert(cfg.eligibility_mode == "hard_spike");
 assert(abs(double(cfg.hard_event_gain) - 1) < 1e-12);
 assert(abs(double(cfg.initial_bias) - 20) < 1e-12);
 assert(cfg.N_hidden == 32000 && cfg.N_recurrent == 10);
+spsa = banff("config", "breast_cancer", struct('method', "spsa"));
+assert(spsa.epochs == 50000);
+assert(spsa.spsa_schedule_epochs == 50000);
+assert(spsa.learning_rate_schedule_epochs == 50000);
+assert(~isfield(spsa, 'spsa_continuation_boundary'));
 end
 
 function test_dataset_hashes()
