@@ -551,17 +551,21 @@ end
 
 function [rates,isi] = event_statistics(events,cfg)
 neuron=double(events.neuron(:)); step=double(events.step(:));
-if isempty(neuron), rates=[]; isi=[]; return; end
-[uniqueNeuron,~,group]=unique(neuron); counts=accumarray(group,1);
-% Events cover both the autonomous warmup and scored test interval. Use the
-% complete simulated duration rather than the final spike time, which would
-% overestimate rates whenever activity stops before the last step.
-recordingSteps=round((double(cfg.test_warmup_time)+double(cfg.test_time)) ...
-    /double(cfg.dt));
-if any(step < 1 | step > recordingSteps)
+% Report activity only over the scored test interval. Warmup spikes are useful
+% for trajectory initialization and raster context, but must not contribute to
+% firing rates, active-neuron fractions, or inter-spike intervals.
+warmupSteps=round(double(cfg.test_warmup_time)/double(cfg.dt));
+recordingSteps=round(double(cfg.test_time)/double(cfg.dt));
+lastRecordingStep=warmupSteps+recordingSteps;
+if any(step < 1 | step > lastRecordingStep)
     error('banff:evaluationEventStep', ...
         'A recorded spike lies outside the configured evaluation interval.');
 end
+scored=step>warmupSteps;
+neuron=neuron(scored);
+step=step(scored)-warmupSteps;
+if isempty(neuron), rates=[]; isi=[]; return; end
+[uniqueNeuron,~,group]=unique(neuron); counts=accumarray(group,1);
 duration=max(1,recordingSteps)*double(cfg.dt); rates=counts./duration; isi=[];
 for index=1:numel(uniqueNeuron)
     times=sort(step(group==index));
