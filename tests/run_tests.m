@@ -245,13 +245,6 @@ for mode = ["hard_spike" "surrogate"]
 end
 end
 
-function test_checkpoint_restart()
-% Require an interrupted/resumed run to reproduce uninterrupted trainable state.
-if ~canUseGPU
-    warning('BANFF:testNoGPU','Checkpoint test skipped because no supported GPU is available.');
-    return;
-end
-
 function test_canonical_amsgrad()
 cfg = banff("config", "lorenz", struct( ...
     'N_hidden',2,'N_recurrent',1,'initial_bias',single(0), ...
@@ -285,6 +278,13 @@ for step = 1:size(gradients,2)
     assert(max(abs(double(P.v)-double(v))) < 2e-7);
     assert(max(abs(double(P.vMax)-double(vMax))) < 2e-7);
 end
+end
+
+function test_checkpoint_restart()
+% Require an interrupted/resumed run to reproduce uninterrupted trainable state.
+if ~canUseGPU
+    warning('BANFF:testNoGPU','Checkpoint test skipped because no supported GPU is available.');
+    return;
 end
 
 root = tempname; mkdir(root); cleanup = onCleanup(@() rmdir(root,'s')); %#ok<NASGU>
