@@ -32,6 +32,7 @@ run(@test_canonical_amsgrad, 'canonical AMSGrad update');
 run(@test_phase_metric_identity, 'phase metric identity');
 run(@test_phase_metric_shape_rejection, 'phase metric shape rejection');
 run(@test_training_provenance_scope, 'training provenance compatibility scope');
+run(@test_provenance_line_endings, 'cross-platform provenance line endings');
 run(@test_target_integrator_refinement, 'target integrator refinement');
 run(@test_dynamics_burn_in_and_jitter, 'dynamics burn-in and IC jitter conventions');
 if mode == "full"
@@ -287,6 +288,30 @@ assert(~isfield(training,'banff_test_m'));
 assert(~isfield(training,'banff_publication_m'));
 assert(banff_provenance("assert_training_compatible", ...
     struct('training_source_sha256',training)));
+end
+
+function test_provenance_line_endings()
+% An identical source file must retain its provenance across Linux (LF),
+% Windows (CRLF), and a legacy/mixed text representation.
+folder = tempname;
+mkdir(folder);
+cleanup = onCleanup(@() rmdir(folder,'s')); %#ok<NASGU>
+lfFile = fullfile(folder,'lf.m');
+crlfFile = fullfile(folder,'crlf.m');
+mixedFile = fullfile(folder,'mixed.m');
+write_bytes(lfFile,uint8(['alpha' 10 'beta' 10 'gamma' 10]));
+write_bytes(crlfFile,uint8(['alpha' 13 10 'beta' 13 10 'gamma' 13 10]));
+write_bytes(mixedFile,uint8(['alpha' 13 10 'beta' 10 'gamma' 13]));
+expected = banff_provenance("hash_file",lfFile);
+assert(strcmp(expected,banff_provenance("hash_file",crlfFile)));
+assert(strcmp(expected,banff_provenance("hash_file",mixedFile)));
+end
+
+function write_bytes(file, bytes)
+fileId = fopen(file,'w');
+assert(fileId >= 0,'Could not create provenance test file %s.',file);
+cleanup = onCleanup(@() fclose(fileId)); %#ok<NASGU>
+fwrite(fileId,bytes,'uint8');
 end
 
 function test_canonical_amsgrad()

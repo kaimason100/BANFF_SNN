@@ -10,6 +10,8 @@ function value = banff_provenance(action, varargin)
 %   orchestration, publication export, Live Scripts, and plotting code are
 %   intentionally outside this compatibility boundary so they may be improved
 %   after a network has been trained.
+%   Source hashes use canonical LF line endings so that an unchanged Git tree
+%   has the same identity on Windows and Linux.
 
 switch lower(string(action))
     case "all"
@@ -19,6 +21,9 @@ switch lower(string(action))
     case "assert_training_compatible"
         assert_training_compatible(varargin{1});
         value = true;
+    case "hash_file"
+        % Exposed for the cross-platform provenance regression test.
+        value = file_sha256(varargin{1});
     otherwise
         error('banff:provenanceAction', 'Unknown provenance action "%s".', action);
 end
@@ -88,9 +93,17 @@ if fileId < 0
     error('banff:sourceHash','Could not open %s.',file);
 end
 cleanup = onCleanup(@() fclose(fileId)); %#ok<NASGU>
-while true
-    bytes = fread(fileId,1024*1024,'*uint8');
-    if isempty(bytes), break; end
+bytes = fread(fileId,Inf,'*uint8');
+if ~isempty(bytes)
+    % Git stores the publication sources with LF endings, whereas a Windows
+    % checkout may contain CRLF or even mixed endings. Hash the canonical text
+    % representation: remove CR from CRLF and map any lone CR to LF. Reading
+    % the complete (small) source file also handles a CRLF pair at what would
+    % otherwise be a streaming-block boundary.
+    remove = false(size(bytes));
+    remove(1:end-1) = bytes(1:end-1) == 13 & bytes(2:end) == 10;
+    bytes(remove) = [];
+    bytes(bytes == 13) = 10;
     engine.update(bytes);
 end
 digest = typecast(engine.digest(),'uint8');
