@@ -2,6 +2,10 @@ function report = run_tests(mode)
 %RUN_TESTS Mathematical and reproducibility regression tests for BANFF SNN.
 %   RUN_TESTS("quick") runs CPU/data tests. RUN_TESTS("full") additionally
 %   runs GPU-kernel comparisons, nine-task smoke tests and checkpoint restart.
+%   Quick tests target mathematical identities, leakage prevention and indexed
+%   reproducibility at small sizes. Full tests add backend equivalence and
+%   end-to-end orchestration. Fixed tolerances are chosen for the precision of
+%   the quantity under test rather than reused indiscriminately.
 
 if nargin < 1, mode = "quick"; end
 mode = lower(string(mode));
@@ -24,10 +28,14 @@ run(@test_static_splits_and_preprocessing, 'static splits/preprocessing');
 run(@test_low_rank_operator, 'low-rank operator and Dale signs');
 run(@test_full_state_finite_difference, 'full local-state finite difference');
 run(@test_lsti_event_sensitivity, 'LSTI event-time sensitivity');
+run(@test_canonical_amsgrad, 'canonical AMSGrad update');
 run(@test_phase_metric_identity, 'phase metric identity');
 run(@test_target_integrator_refinement, 'target integrator refinement');
+run(@test_dynamics_burn_in_and_jitter, 'dynamics burn-in and IC jitter conventions');
 if mode == "full"
     run(@test_gpu_reference_equivalence, 'shared timestep CPU/GPU agreement');
+    run(@test_linear_path_equivalence, 'blocked encoder/averaged decoder agreement');
+    run(@test_dynamics_output_elision, 'dynamics output-elision agreement');
     run(@test_checkpoint_restart, 'checkpoint/restart equivalence');
     run(@test_nine_task_smoke, 'nine-task train/test smoke test');
     run(@test_alternative_paths, 'surrogate/full-rank/SPSA smoke test');
@@ -60,6 +68,8 @@ assert(cfg.eligibility_mode == "hard_spike");
 assert(abs(double(cfg.hard_event_gain) - 1) < 1e-12);
 assert(abs(double(cfg.initial_bias) - 20) < 1e-12);
 assert(cfg.N_hidden == 32000 && cfg.N_recurrent == 10);
+assert(cfg.batch_size == 256);
+assert(cfg.optimizer == "amsgrad");
 spsa = banff("config", "breast_cancer", struct('method', "spsa"));
 assert(spsa.epochs == 50000);
 assert(spsa.spsa_schedule_epochs == 50000);
@@ -102,6 +112,7 @@ end
 end
 
 function test_low_rank_operator()
+% Verify the factorised recurrent operator and explicit diagonal correction.
 cfg = banff("config", "breast_cancer", struct( ...
     'N_hidden', 32, 'N_recurrent', 5, 'recurrent_gain', single(.05)));
 P = banff_model('create', 3, 2, cfg);
@@ -122,6 +133,7 @@ assert(rank(double(P.recurrent_expansion) * double(P.W_feedback), 1e-9) <= cfg.N
 end
 
 function test_full_state_finite_difference()
+% Compare propagated local bias sensitivities with centred finite differences.
 cfg = banff("config", "lorenz", struct( ...
     'N_hidden',1,'N_recurrent',1,'recurrent_gain',single(0), ...
     'encoder_gain',single(0),'initial_bias',single(4), ...
@@ -158,6 +170,7 @@ assert(adaptationError < 2e-4, ...
 end
 
 function test_lsti_event_sensitivity()
+% Audit the selected-event, frozen-rho derivative on pre/post-event branches.
 cfg = banff("config", "lorenz", struct( ...
     'N_hidden',1,'N_recurrent',1,'recurrent_gain',single(0), ...
     'encoder_gain',single(0),'initial_bias',single(80), ...
@@ -200,6 +213,7 @@ assert(abs(d) < 1e-12);
 end
 
 function test_gpu_reference_equivalence()
+% Compare every state field and event diagnostic after one CPU/GPU transition.
 if ~canUseGPU
     warning('BANFF:testNoGPU','GPU test skipped because no supported GPU is available.');
     return;
@@ -232,10 +246,47 @@ end
 end
 
 function test_checkpoint_restart()
+% Require an interrupted/resumed run to reproduce uninterrupted trainable state.
 if ~canUseGPU
     warning('BANFF:testNoGPU','Checkpoint test skipped because no supported GPU is available.');
     return;
 end
+
+function test_canonical_amsgrad()
+cfg = banff("config", "lorenz", struct( ...
+    'N_hidden',2,'N_recurrent',1,'initial_bias',single(0), ...
+    'adam_beta1',single(.9),'adam_beta2',single(.99), ...
+    'adam_epsilon',single(1e-7)));
+P = banff_model('create',1,1,cfg);
+P.B(:) = 0;
+
+% Independent conventional AMSGrad reference calculation.
+m = zeros(2,1,'single');
+v = zeros(2,1,'single');
+vMax = zeros(2,1,'single');
+B = zeros(2,1,'single');
+gradients = single([2 .5 -1; -.25 3 .75]);
+learningRates = single([.03 .02 .01]);
+b1 = single(cfg.adam_beta1);
+b2 = single(cfg.adam_beta2);
+for step = 1:size(gradients,2)
+    g = gradients(:,step);
+    m = b1.*m + (single(1)-b1).*g;
+    v = b2.*v + (single(1)-b2).*g.*g;
+    vMax = max(vMax,v);
+    mHat = m ./ (single(1)-b1.^single(step));
+    vMaxHat = vMax ./ (single(1)-b2.^single(step));
+    B = B-learningRates(step).*mHat ./ ...
+        (sqrt(vMaxHat)+single(cfg.adam_epsilon));
+
+    P = banff_model('adam',P,g,learningRates(step),1,cfg);
+    assert(max(abs(double(P.B)-double(B))) < 2e-7);
+    assert(max(abs(double(P.m)-double(m))) < 2e-7);
+    assert(max(abs(double(P.v)-double(v))) < 2e-7);
+    assert(max(abs(double(P.vMax)-double(vMax))) < 2e-7);
+end
+end
+
 root = tempname; mkdir(root); cleanup = onCleanup(@() rmdir(root,'s')); %#ok<NASGU>
 common = struct('N_hidden',16,'N_recurrent',4,'epochs',2,'validate_every',1, ...
     'presentation_time',single(.005),'average_fraction',single(.4), ...
@@ -251,7 +302,57 @@ assert(B2.complete);
 assert(max(abs(double(A.final_trainable_state.B)-double(B2.final_trainable_state.B))) < 1e-5);
 end
 
+function test_dynamics_output_elision()
+% Requesting no trajectory storage must not change loss or bias gradient.
+if ~canUseGPU
+    warning('BANFF:testNoGPU','GPU test skipped because no supported GPU is available.');
+    return;
+end
+cfg = banff("config", "lorenz", struct( ...
+    'N_hidden',32,'N_recurrent',5,'teacher_steps',3,'closed_loop_steps',2));
+P = banff_model('gpu', banff_model('create',3,3,cfg));
+rng(29,'twister');
+target = single(randn(3,13,'single'));
+teacherForcing = true(1,13);
+teacherForcing([5 6 10 11]) = false;
+[lossCompact, gradientCompact] = banff_model( ...
+    'dynamics', P, target, teacherForcing, true, false);
+[lossStored, gradientStored, output] = banff_model( ...
+    'dynamics', P, target, teacherForcing, true, false);
+assert(~isempty(output) && size(output,2) == size(target,2)-1);
+assert(abs(double(gather(lossCompact-lossStored))) < 1e-6);
+assert(max(abs(double(gather(gradientCompact-gradientStored))),[],'all') < 1e-6);
+end
+
+function test_linear_path_equivalence()
+% Audit the two linear-operation reorderings used by optimized simulation.
+if ~canUseGPU
+    warning('BANFF:testNoGPU','GPU test skipped because no supported GPU is available.');
+    return;
+end
+cfg = banff("config", "lorenz", struct('N_hidden',32,'N_recurrent',5));
+P = banff_model('gpu', banff_model('create',3,3,cfg));
+rng(31,'twister');
+inputs = gpuArray(single(randn(3,7,'single')));
+encoderColumns = gpuArray.zeros(P.N_hidden,7,'single');
+for column = 1:7
+    encoderColumns(:,column) = P.W_in * (P.inputScale .* inputs(:,column));
+end
+encoderBlock = P.W_in * (P.inputScale .* inputs);
+assert(max(abs(double(gather(encoderColumns-encoderBlock))),[],'all') < 5e-5);
+
+filteredStates = gpuArray(single(randn(P.N_hidden,7,'single')));
+decoderRepeated = gpuArray.zeros(P.N_output,1,'single');
+for column = 1:7
+    decoderRepeated = decoderRepeated + P.W_out * filteredStates(:,column);
+end
+decoderRepeated = decoderRepeated ./ single(7);
+decoderAveraged = P.W_out * (sum(filteredStates,2) ./ single(7));
+assert(max(abs(double(gather(decoderRepeated-decoderAveraged))),[],'all') < 5e-5);
+end
+
 function test_nine_task_smoke()
+% Exercise train/test orchestration for every registered task at minimal size.
 if ~canUseGPU
     warning('BANFF:testNoGPU','Smoke tests skipped because no supported GPU is available.');
     return;
@@ -305,6 +406,38 @@ x3 = banff_data('trajectory',system,initial,T,fine);
 e12 = norm(double(x1(:,end)-x2(:,end)));
 e23 = norm(double(x2(:,end)-x3(:,end)));
 assert(e23 < e12, 'Euler target integration did not improve after halving dt.');
+end
+
+function test_dynamics_burn_in_and_jitter()
+% The endpoint-inclusive trajectory stores t=0 in column one, so a 10-step
+% burn-in must retain column 11. IC jitter denotes a symmetric half-width.
+cfg = banff("config", "lorenz", struct( ...
+    'N_hidden',8,'N_recurrent',2,'long_simulation_time',single(.03), ...
+    'burn_in_time',single(.01),'training_window',single(.01), ...
+    'initial_condition_jitter',single(.02), ...
+    'validation_initial_conditions',4,'test_initial_conditions',4));
+[~, information] = banff_data('dynamics', cfg);
+assert(information.burn_index == round(cfg.burn_in_time/cfg.dt)+1);
+
+system = banff_data('system', cfg.task);
+base = single(system.initial_state(:));
+validation = banff_data('initial_conditions', cfg, "validation");
+test = banff_data('initial_conditions', cfg, "test");
+expectedFirst = base;
+expectedFirst(1) = expectedFirst(1)+cfg.initial_condition_jitter;
+assert(isequal(validation(:,1),expectedFirst));
+
+previous = rng;
+restore = onCleanup(@() rng(previous)); %#ok<NASGU>
+rng(cfg.validation_initial_condition_seed,'twister');
+expectedValidationRandom = base + cfg.initial_condition_jitter .* ...
+    (single(2).*rand(numel(base),cfg.validation_initial_conditions-1,'single')-single(1));
+rng(cfg.test_initial_condition_seed,'twister');
+expectedTest = base + cfg.initial_condition_jitter .* ...
+    (single(2).*rand(numel(base),cfg.test_initial_conditions,'single')-single(1));
+assert(isequal(validation(:,2:end),expectedValidationRandom));
+assert(isequal(test,expectedTest));
+assert(all(abs(test-base) <= cfg.initial_condition_jitter,'all'));
 end
 
 function test_alternative_paths()

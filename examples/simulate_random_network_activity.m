@@ -1,6 +1,8 @@
 %% simulate_random_network_activity.m
 % Forward-only CPU diagnostic using the same model constructor and readable
 % reference timestep as the training code. No neuron parameters are copied.
+% This example is qualitative and does not optimise parameters. State arrays
+% follow the production model convention, and all displayed times are seconds.
 
 clear; clc; close all;
 root = fileparts(fileparts(mfilename('fullpath')));

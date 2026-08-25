@@ -3,6 +3,9 @@ function varargout = banff_plot(action, varargin)
 %   Training and testing use BANFF_MODEL. Plotting reuses the readable CPU
 %   reference step in BANFF_MODEL instead of maintaining a third copy of the
 %   neuron equations.
+%   This adapter contains presentation-oriented data extraction only. It does
+%   not define scientific dynamics or learning rules, and any replayed state is
+%   explicitly reconstructed from a validated model and supplied initial data.
 
 switch lower(string(action))
     case "model"
@@ -25,6 +28,7 @@ end
 end
 
 function P = validate_model(P, options)
+%VALIDATE_MODEL Reject figure inputs that do not match requested provenance.
 required = {'N_hidden','N_output','W_in','W_out','B','recurrent_mode'};
 missing = required(~isfield(P, required));
 if ~isempty(missing)
@@ -39,6 +43,7 @@ end
 end
 
 function data = static_data(domain, options)
+%STATIC_DATA Return a deterministic subset suitable for explanatory panels.
 if nargin < 2 || ~isstruct(options)
     error('banff:plotData', 'Publication options are required.');
 end
@@ -63,6 +68,7 @@ data = struct('X_train', raw.X_train, 'Y_train', raw.Y_train, ...
 end
 
 function evaluation = closed_loop_input(options)
+%CLOSED_LOOP_INPUT Reconstruct the tested autonomous trajectory for plotting.
 cfg = options;
 cfg.test_time = single(field_or(options, 'T_sim', options.test_time));
 cfg.test_warmup_time = single(field_or(options, 'closed_loop_warmup_time', ...
@@ -94,11 +100,17 @@ xSyn = state.x;
 r = state.r;
 end
 
-function [spikes, voltage] = static_traces(P, X, options)
+function [spikes, voltage, diagnostics] = static_traces(P, X, options)
+%STATIC_TRACES Replay selected samples with CPU-readable per-step state output.
 sampleCount = size(X, 2);
-steps = double(options.steps_present);
+steps = double(field_or(options, 'steps_present', options.presentation_steps));
 spikes = false(P.N_hidden, steps, sampleCount);
 voltage = zeros(P.N_hidden, steps, 'single');
+diagnostics = struct('time_seconds', single((0:steps-1) .* double(P.dt)), ...
+    'mean_encoder_current', zeros(1, steps, 'single'), ...
+    'mean_recurrent_current', zeros(1, steps, 'single'), ...
+    'mean_bias_current', zeros(1, steps, 'single'), ...
+    'mean_adaptation_current', zeros(1, steps, 'single'));
 for sample = 1:sampleCount
     u = repmat(single(P.restingVoltage), P.N_hidden, 1);
     w = zeros(P.N_hidden, 1, 'single');
@@ -106,6 +118,13 @@ for sample = 1:sampleCount
     r = zeros(P.N_hidden, 1, 'single');
     inputCurrent = P.W_in * (P.inputScale .* single(X(:, sample)));
     for step = 1:steps
+        if sample == 1
+            recurrentCurrent = replay_recurrent_current(P, r);
+            diagnostics.mean_encoder_current(step) = mean(inputCurrent);
+            diagnostics.mean_recurrent_current(step) = mean(recurrentCurrent);
+            diagnostics.mean_bias_current(step) = mean(single(P.B));
+            diagnostics.mean_adaptation_current(step) = mean(w);
+        end
         [u, w, ~, fired, ~, x, r] = ...
             replay_step(P, inputCurrent, u, w, x, r);
         spikes(:, step, sample) = fired;
@@ -113,6 +132,17 @@ for sample = 1:sampleCount
             voltage(:, step) = u;
         end
     end
+end
+end
+
+function current = replay_recurrent_current(P, filteredSpikes)
+% Mirror BANFF_MODEL's fixed recurrent-current calculation for diagnostics.
+if string(P.recurrent_mode) == "full_rank"
+    current = single(P.W_recurrent * double(filteredSpikes));
+else
+    latent = P.W_feedback * filteredSpikes;
+    current = P.recurrentGain .* (P.recurrent_expansion * latent) ...
+        - P.self_coupling .* filteredSpikes;
 end
 end
 
@@ -128,6 +158,7 @@ end
 end
 
 function distance = phase_distance(prediction, truth, options)
+%PHASE_DISTANCE Delegate to the publication metric rather than reimplement it.
 if nargin < 3 || isempty(options), options = struct(); end
 metric = struct('projections', field_or(options, 'NumProjections', 128), ...
     'trim_fraction', field_or(options, 'TrimFraction', .10), ...

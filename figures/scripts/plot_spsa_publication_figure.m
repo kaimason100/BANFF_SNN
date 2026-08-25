@@ -1,3 +1,7 @@
+%% SPSA control-experiment publication figure
+% Compare saved SPSA controls across task families. Summary statistics are
+% computed only from completed tested seeds found in the analysis directory.
+
 clear; clc; close all;
 repo_root = project_root();
 addpath(fullfile(repo_root, 'figures', 'matlab'), '-begin');

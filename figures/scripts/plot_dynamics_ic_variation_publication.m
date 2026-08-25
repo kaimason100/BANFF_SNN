@@ -1,3 +1,8 @@
+%% Dynamical-system initial-condition variation panels
+% Load completed publication-analysis artifacts only; no model is evaluated.
+% Each predicted trajectory is paired with the target generated from the same
+% initial condition, and all time axes are reported in physical seconds.
+
 clear; clc; close all;
 repo_root = project_root();
 addpath(fullfile(repo_root, 'figures', 'matlab'), '-begin');

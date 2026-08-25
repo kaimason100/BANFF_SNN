@@ -1,3 +1,7 @@
+%% Lorenz neuron-count scaling figure
+% Render saved, tested neuron-sweep results. The script requires the complete
+% initial-condition protocol so network-size comparisons share evaluation data.
+
 clear; clc; close all;
 repo_root = project_root();
 addpath(fullfile(repo_root, 'figures', 'matlab'), '-begin');

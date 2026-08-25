@@ -1,3 +1,8 @@
+%% Neural-activity publication panels
+% Assemble activity views from validated saved analyses and the shared BANFF
+% replay interface. Configuration below controls display selection only and
+% does not change training, test metrics or saved scientific results.
+
 clear; clc; close all;
 repo_root = project_root();
 add_project_paths(repo_root);

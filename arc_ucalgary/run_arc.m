@@ -1,4 +1,11 @@
-% Run one BANFF training job selected by the Slurm array index.
+%RUN_ARC Dispatch one complete experiment selected by a Slurm array index.
+% The mixed-radix mapping is deterministic: the task varies fastest and the
+% network seed varies next. BANFF_ARCHITECTURE selects the experiment family
+% without bypassing the public RUN_EXPERIMENT configuration path.
+%
+% Time-limit checkpointing is handled inside BANFF training. Scheduler-level
+% resubmission preserves SLURM_JOB_PARTITION, so a continuation cannot migrate
+% to a different GPU partition after its initial hierarchical submission.
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root);
 
@@ -39,6 +46,7 @@ end
 
 result = banff("train", task, options);
 if ~result.complete
-    fprintf('Checkpoint saved; asking Slurm to requeue this array task.\n');
+    fprintf(['Checkpoint saved; asking the Slurm wrapper to resubmit this ' ...
+        'array task on its currently allocated partition.\n']);
     exit(75);
 end

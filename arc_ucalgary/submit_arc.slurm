@@ -1,4 +1,7 @@
 #!/bin/bash
+# One array element requests one GPU and runs one complete BANFF task/seed.
+# The MATLAB process owns scientific checkpoint creation; this wrapper handles
+# scheduler signals and same-partition continuation without altering model state.
 #SBATCH --job-name=banff_snn
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -45,7 +48,41 @@ nvidia-smi || exit 1
 matlab -batch "run('arc_ucalgary/run_arc.m')"
 status=$?
 if [ "${status}" -eq 75 ]; then
-    scontrol requeue "${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+    # Initial jobs may be offered to several compatible partitions. Once one
+    # partition runs this task, submit continuation as a new one-item array
+    # restricted to that exact partition.
+    allocated_partition="${SLURM_JOB_PARTITION:-}"
+    if [ -z "${allocated_partition}" ]; then
+        echo "Checkpoint saved, but SLURM_JOB_PARTITION is empty; refusing an unpinned resubmission." >&2
+        exit 1
+    fi
+    case "${allocated_partition}" in
+        *,*)
+            echo "Checkpoint saved, but SLURM_JOB_PARTITION contains multiple partitions; refusing an unpinned resubmission." >&2
+            exit 1
+            ;;
+    esac
+    if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+        echo "Checkpoint saved, but SLURM_ARRAY_TASK_ID is empty; cannot resubmit this array item." >&2
+        exit 1
+    fi
+
+    submit_script="${SLURM_SUBMIT_DIR}/arc_ucalgary/submit_arc.slurm"
+    if [ ! -f "${submit_script}" ]; then
+        echo "Checkpoint saved, but the resubmission script was not found: ${submit_script}" >&2
+        exit 1
+    fi
+    echo "Checkpoint saved on partition ${allocated_partition}."
+    echo "Resubmitting array item ${SLURM_ARRAY_TASK_ID} to the same partition only."
+    sbatch --partition="${allocated_partition}" \
+        --array="${SLURM_ARRAY_TASK_ID}" \
+        --export=ALL \
+        "${submit_script}"
+    resubmit_status=$?
+    if [ "${resubmit_status}" -ne 0 ]; then
+        echo "Checkpoint is intact, but same-partition resubmission failed." >&2
+        exit "${resubmit_status}"
+    fi
     exit 0
 fi
 exit "${status}"

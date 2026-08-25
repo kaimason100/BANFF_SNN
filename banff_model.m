@@ -197,27 +197,30 @@ recordSpikes = logical(recordSpikes);
 batchSize = size(inputBatch, 2);
 state = initial_state(P, batchSize);
 inputCurrent = P.W_in * (P.inputScale .* inputBatch);
-outputSum = gpuArray.zeros(P.N_output, batchSize, 'single');
+biasCurrent = repmat(P.B, 1, batchSize);
+filteredStateSum = gpuArray.zeros(P.N_hidden, batchSize, 'single');
 eligibilitySum = gpuArray.zeros(P.N_hidden, batchSize, 'single');
 spikeCount = gpuArray.zeros(P.N_hidden, batchSize, 'single');
 
 for step = 1:P.presentationSteps
-    totalCurrent = inputCurrent + recurrent_current(P, state.r) + P.B;
+    recurrentCurrent = recurrent_current(P, state.r);
     if recordSpikes
         [state, spike] = fused_step( ...
-            P, state, totalCurrent, trackEligibilityGpu, true);
+            P, state, inputCurrent, recurrentCurrent, biasCurrent, ...
+            trackEligibilityGpu, true);
         spikeCount = spikeCount + single(spike);
     else
-        state = fused_step(P, state, totalCurrent, trackEligibilityGpu, false);
+        state = fused_step(P, state, inputCurrent, recurrentCurrent, ...
+            biasCurrent, trackEligibilityGpu, false);
     end
     if step >= P.averageStartStep
-        outputSum = outputSum + P.W_out * state.r;
+        filteredStateSum = filteredStateSum + state.r;
         if trackEligibilityHost
             eligibilitySum = eligibilitySum + state.eligibilityDecay;
         end
     end
 end
-averageOutput = outputSum ./ single(P.averageSteps);
+averageOutput = P.W_out * (filteredStateSum ./ single(P.averageSteps));
 averageEligibility = eligibilitySum ./ single(P.averageSteps);
 end
 
@@ -231,10 +234,18 @@ trackEligibilityGpu = gpuArray(trackEligibilityHost);
 steps = size(targetSequence, 2) - 1;
 state = initial_state(P, 1);
 previousOutput = gpuArray.zeros(P.N_output, 1, 'single');
-output = gpuArray.zeros(P.N_output, steps, 'single');
+storeOutput = nargout >= 3;
+if storeOutput
+    output = gpuArray.zeros(P.N_output, steps, 'single');
+else
+    output = gpuArray.zeros(P.N_output, 0, 'single');
+end
 biasGradient = gpuArray.zeros(P.N_hidden, 1, 'single');
 loss = gpuArray.zeros(1, 1, 'single');
 events = struct('neuron', int32([]), 'step', int32([]), 'rho', single([]));
+teacherCurrentBlock = gpuArray.zeros(P.N_hidden, 0, 'single');
+teacherBlockFirst = 1;
+teacherBlockLast = 0;
 
 eventBlockSize = 1000;
 if recordEvents
@@ -244,17 +255,28 @@ end
 
 for step = 1:steps
     if step == 1 || teacherForcing(step)
-        networkInput = targetSequence(:, step);
+        if step > teacherBlockLast
+            teacherBlockFirst = step;
+            teacherBlockLast = step;
+            while teacherBlockLast < steps && teacherForcing(teacherBlockLast + 1)
+                teacherBlockLast = teacherBlockLast + 1;
+            end
+            teacherCurrentBlock = P.W_in * (P.inputScale .* ...
+                targetSequence(:, teacherBlockFirst:teacherBlockLast));
+        end
+        inputCurrent = teacherCurrentBlock(:, step - teacherBlockFirst + 1);
     else
-        networkInput = previousOutput;
+        inputCurrent = P.W_in * (P.inputScale .* previousOutput);
     end
-    inputCurrent = P.W_in * (P.inputScale .* networkInput);
-    totalCurrent = inputCurrent + recurrent_current(P, state.r) + P.B;
+    recurrentCurrent = recurrent_current(P, state.r);
     [state, spike, rho] = fused_step( ...
-        P, state, totalCurrent, trackEligibilityGpu, recordEvents);
+        P, state, inputCurrent, recurrentCurrent, P.B, ...
+        trackEligibilityGpu, recordEvents);
 
     prediction = P.W_out * state.r;
-    output(:, step) = prediction;
+    if storeOutput
+        output(:, step) = prediction;
+    end
     previousOutput = prediction;
     errorSignal = prediction - targetSequence(:, step + 1);
     loss = loss + sum(errorSignal .* errorSignal, 'all');
@@ -306,15 +328,16 @@ else
 end
 end
 
-function [state, spike, rho] = ...
-        fused_step(P, state, totalCurrent, trackEligibility, returnEvents)
+function [state, spike, rho] = fused_step(P, state, inputCurrent, ...
+        recurrentCurrent, biasCurrent, trackEligibility, returnEvents)
 if returnEvents
     [state.u, state.w, state.x, state.r, state.epsilonVoltage, ...
         state.epsilonAdaptation, state.eligibilityRise, ...
         state.eligibilityDecay, spike, rho] = arrayfun( ...
-        @neuron_synapse_eligibility_step, state.u, state.w, state.x, state.r, ...
+        @neuron_step_from_current_components, state.u, state.w, state.x, state.r, ...
         state.epsilonVoltage, state.epsilonAdaptation, state.eligibilityRise, ...
-        state.eligibilityDecay, totalCurrent, trackEligibility, ...
+        state.eligibilityDecay, inputCurrent, recurrentCurrent, biasCurrent, ...
+        trackEligibility, ...
         P.alpha, P.logAlpha, P.logBeta, P.logGammaRise, P.logGammaDecay, ...
         P.restingVoltage, P.thresholdVoltage, P.resetVoltage, ...
         P.adaptationJump, P.hardSpikeEligibility, P.hardEventGain, ...
@@ -323,9 +346,10 @@ else
     [state.u, state.w, state.x, state.r, state.epsilonVoltage, ...
         state.epsilonAdaptation, state.eligibilityRise, ...
         state.eligibilityDecay] = arrayfun( ...
-        @neuron_synapse_eligibility_step, state.u, state.w, state.x, state.r, ...
+        @neuron_step_from_current_components, state.u, state.w, state.x, state.r, ...
         state.epsilonVoltage, state.epsilonAdaptation, state.eligibilityRise, ...
-        state.eligibilityDecay, totalCurrent, trackEligibility, ...
+        state.eligibilityDecay, inputCurrent, recurrentCurrent, biasCurrent, ...
+        trackEligibility, ...
         P.alpha, P.logAlpha, P.logBeta, P.logGammaRise, P.logGammaDecay, ...
         P.restingVoltage, P.thresholdVoltage, P.resetVoltage, ...
         P.adaptationJump, P.hardSpikeEligibility, P.hardEventGain, ...
@@ -333,6 +357,26 @@ else
     spike = [];
     rho = [];
 end
+end
+
+function [u, w, x, r, epsilonVoltage, epsilonAdaptation, ...
+        eligibilityRise, eligibilityDecay, spike, rho] = ...
+        neuron_step_from_current_components(u0, w0, x0, r0, ...
+        epsilonVoltage0, epsilonAdaptation0, eligibilityRise0, ...
+        eligibilityDecay0, inputCurrent, recurrentCurrent, biasCurrent, ...
+        trackEligibility, alpha, logAlpha, logBeta, logGammaRise, ...
+        logGammaDecay, restingVoltage, thresholdVoltage, resetVoltage, ...
+        adaptationJump, hardSpikeEligibility, hardEventGain, ...
+        surrogatePeak, surrogateHalfWidth, synapticJump)
+current = inputCurrent + recurrentCurrent + biasCurrent;
+[u, w, x, r, epsilonVoltage, epsilonAdaptation, eligibilityRise, ...
+    eligibilityDecay, spike, rho] = neuron_synapse_eligibility_step( ...
+    u0, w0, x0, r0, epsilonVoltage0, epsilonAdaptation0, ...
+    eligibilityRise0, eligibilityDecay0, current, trackEligibility, ...
+    alpha, logAlpha, logBeta, logGammaRise, logGammaDecay, ...
+    restingVoltage, thresholdVoltage, resetVoltage, adaptationJump, ...
+    hardSpikeEligibility, hardEventGain, surrogatePeak, ...
+    surrogateHalfWidth, synapticJump);
 end
 
 function events = append_event_block(events, spikeGpu, rhoGpu, firstStep)
@@ -346,7 +390,7 @@ events.step = [events.step; int32(firstStep + localStep)];
 events.rho = [events.rho; single(rho)];
 end
 
-%% Adam/AMSGrad bias update
+%% Conventional bias-corrected AMSGrad bias update
 function P = adam_update(P, gradient, learningRate, averageCount, cfg)
 P.adamStep = P.adamStep + 1;
 gradient = single(gradient) ./ single(max(1, averageCount));
@@ -355,10 +399,12 @@ b2 = single(cfg.adam_beta2);
 P.m = b1 .* P.m + (single(1) - b1) .* gradient;
 P.v = b2 .* P.v + (single(1) - b2) .* gradient .* gradient;
 mHat = P.m ./ (single(1) - b1 .^ single(P.adamStep));
-vHat = P.v ./ (single(1) - b2 .^ single(P.adamStep));
-P.vMax = max(P.vMax, vHat);
+% AMSGrad takes the running maximum of the raw exponential second-moment
+% accumulator. Apply the current Adam bias correction after updating it.
+P.vMax = max(P.vMax, P.v);
+vMaxHat = P.vMax ./ (single(1) - b2 .^ single(P.adamStep));
 P.B = P.B - single(learningRate) .* mHat ...
-    ./ (sqrt(P.vMax) + single(cfg.adam_epsilon));
+    ./ (sqrt(vMaxHat) + single(cfg.adam_epsilon));
 end
 
 function state = gather_trainable_state(P)
@@ -576,9 +622,10 @@ for index = 1:numel(fields)
     end
 end
 inputCurrent = gpuArray(single(inputCurrent));
-totalCurrent = inputCurrent + recurrent_current(P, state.r) + P.B;
-[state, spike, rho] = fused_step(P, state, totalCurrent, ...
-    gpuArray(logical(trackEligibility)), true);
+recurrentCurrent = recurrent_current(P, state.r);
+biasCurrent = repmat(P.B, 1, size(state.u, 2));
+[state, spike, rho] = fused_step(P, state, inputCurrent, ...
+    recurrentCurrent, biasCurrent, gpuArray(logical(trackEligibility)), true);
 end
 
 %% Index-stable random numbers (unchanged from the publication implementation)

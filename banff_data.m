@@ -424,7 +424,9 @@ end
 rng(cfg.split_seed, 'twister');
 system = target_system(cfg.task);
 raw = simulate_target(system, system.initial_state, cfg.long_simulation_time, cfg);
-burnIndex = max(1, round(cfg.burn_in_time / cfg.dt));
+% Column one is the state at t=0. Discarding a duration T therefore starts at
+% column round(T/dt)+1, the sample at t=T, rather than one timestep earlier.
+burnIndex = max(1, round(cfg.burn_in_time / cfg.dt) + 1);
 burnIndex = min(burnIndex, size(raw, 2));
 raw = raw(:, burnIndex:end);
 if isfield(savedInformation, 'mean') && isfield(savedInformation, 'std')
@@ -509,8 +511,10 @@ else
     firstRandom = 1;
 end
 if firstRandom <= count
+    % initial_condition_jitter is the maximum absolute perturbation in each
+    % coordinate, so draw uniformly from [-jitter,+jitter].
     initialConditions(:, firstRandom:end) = base ...
-        + cfg.initial_condition_jitter .* ( ...
-        rand(numel(base), count - firstRandom + 1, 'single') - single(0.5));
+        + cfg.initial_condition_jitter .* (single(2) .* ...
+        rand(numel(base), count - firstRandom + 1, 'single') - single(1));
 end
 end

@@ -18,7 +18,8 @@ The scientific core is eight readable MATLAB files:
 - `banff_test.m` — held-out model evaluation.
 - `banff_eval.m` — losses and validation/test protocols shared by train/test.
 - `banff_model.m` — **the single network simulator**: fixed network creation,
-  ALIF/LSTI neuron dynamics, synaptic filtering, eligibility and AMSGrad.
+  ALIF/LSTI neuron dynamics, synaptic filtering, eligibility and conventional
+  bias-corrected AMSGrad.
 - `banff_data.m` — datasets, deterministic splits, preprocessing and target
   dynamical systems.
 - `banff_metrics.m` — classification, regression and phase-portrait metrics.
@@ -148,9 +149,20 @@ the optimiser state is not reset during training.
 
 ## Static-task training semantics
 
-`batch_size=32` is a **GPU memory batch**, not an optimiser minibatch. Gradients
-are accumulated over the complete training set and one Adam/AMSGrad update is
-performed per epoch.
+`batch_size=256` is a **GPU memory batch**, not an optimiser minibatch. Gradients
+are accumulated over the complete training set and one conventional AMSGrad
+update is performed per epoch. The running maximum is taken over the raw
+second-moment accumulator before applying the current Adam bias correction.
+Static training and validation arrays remain GPU-resident;
+the batch size therefore controls simulator-state memory rather than repeated
+host-to-device transfers.
+
+The static simulator averages the filtered hidden state over the readout window
+before applying the linear decoder. The dynamics simulator precomputes encoder
+currents for contiguous teacher-forced blocks, fuses current components inside
+the element-wise neuron kernel, and omits trajectory storage when callers request
+only loss and gradient. These reorderings retain the same model equations but
+may produce normal single-precision reduction-order differences.
 
 Feature normalisation and regression-target normalisation are fitted only on
 the training partition. Exact duplicate feature-target rows are kept in one
@@ -165,6 +177,12 @@ always remains the next reference state. Validation is fully closed loop and
 selects the bias vector with the lowest phase-portrait sliced-Wasserstein
 score. Final testing uses a 5 s network-only warmup, then starts the matched
 true trajectory from the terminal network output.
+
+For dynamical-system evaluation, `initial_condition_jitter` is the maximum
+absolute per-coordinate perturbation: random initial conditions are sampled
+uniformly from `[-initial_condition_jitter,+initial_condition_jitter]` around
+the reference state. Burn-in is endpoint-inclusive and retains the sample at
+exactly `burn_in_time`.
 
 ## Reproducibility
 
@@ -250,8 +268,9 @@ BANFF_SNN/
 └── docs/
 ```
 
-The historical task-by-task Live Scripts have intentionally not been carried
-into the publication package.
+Task-specific held-out evaluation Live Scripts are in `evaluation/`. They use
+the current publication API and architecture while restoring task-specific
+tables, plots and spiking diagnostics.
 
 ## ARC / University of Calgary
 
@@ -262,7 +281,8 @@ bash arc_ucalgary/submit_all.sh
 ```
 
 The Slurm job loads MATLAB R2023a, prints source hashes/GPU information and
-requeues from checkpoints when the wall-time limit is reached. See
+resubmits a checkpointed item only to the partition that ran its first segment,
+while retaining the multi-partition hierarchy for initial submissions. See
 `arc_ucalgary/README_SIMPLIFIED.md`.
 
 ## Public release

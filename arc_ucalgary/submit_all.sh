@@ -1,5 +1,9 @@
 #!/bin/bash
 # Submit every required BANFF training array from the repository root.
+# Initial jobs may be selected by any compatible partition in the ordered
+# hierarchy below. A time-limit continuation is submitted separately by the
+# job script and is restricted to the partition that ran the original job.
+# Array indices encode task and seed according to arc_ucalgary/run_arc.m.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

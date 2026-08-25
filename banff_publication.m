@@ -4,6 +4,10 @@ function outputFile = banff_publication(results)
 %   one scientifically identical configuration (apart from network seed).
 %   Fixed matrices are not duplicated: they are deterministic and can be
 %   regenerated from each seed's saved configuration and seed.
+%   Export is intentionally downstream of formal testing. The compact artifact
+%   contains configuration fingerprints, selected trainable states, metrics and
+%   figure-facing activity while avoiding redundant structural matrices.
+%   Results with different scientific fingerprints cannot be combined.
 
 if isempty(results) || ~all(arrayfun(@(x) isfield(x, 'test'), results))
     error('banff:publicationResults', 'Every supplied result must have been tested.');
@@ -96,6 +100,7 @@ fprintf('Saved publication analysis: %s\n', outputFile);
 end
 
 function seed = empty_seed()
+%EMPTY_SEED Define a stable schema before populating seed-specific exports.
 seed = struct('seed_index', [], 'init_seed', [], 'model_file', '', ...
     'train_backend', '', 'test_backend', '', 'options', struct(), ...
     'architecture', struct(), 'bias', [], 'scientific_config_sha256', '', ...
@@ -105,6 +110,7 @@ seed = struct('seed_index', [], 'init_seed', [], 'model_file', '', ...
 end
 
 function [taskId, family, backend] = publication_identity(cfg)
+%PUBLICATION_IDENTITY Map configuration fields to manuscript-facing labels.
 switch cfg.task
     case "breast_cancer", taskId = 'classification_BC'; family = 'classification';
     case "mnist", taskId = 'classification_MNIST'; family = 'classification';
@@ -152,6 +158,7 @@ name = [stem extension];
 end
 
 function options = publication_options(cfg, information)
+%PUBLICATION_OPTIONS Retain analysis settings required to reproduce figures.
 options = cfg;
 for field = {'checkpoint_hours','output_directory','model_file','verbose_every'}
     if isfield(options, field{1}), options = rmfield(options, field{1}); end
@@ -198,6 +205,7 @@ end
 end
 
 function [test, metrics] = publication_test(R)
+%PUBLICATION_TEST Separate compact predictions from scalar/tabular metrics.
 if R.config.kind == "dynamics"
     test = struct('pred_norm_by_ic', {R.test.prediction}, ...
         'true_norm_by_ic', {R.test.truth}, ...
@@ -222,6 +230,7 @@ end
 end
 
 function [neural, spikeEvents] = dynamics_activity(test, cfg, nHidden)
+%DYNAMICS_ACTIVITY Convert recorded events into compact seed-level summaries.
 nConditions = numel(test.events);
 counts = zeros(nHidden, 1);
 postWarmupSteps = round(cfg.test_time / cfg.dt);

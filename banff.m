@@ -74,6 +74,10 @@ cfg.recurrent_gain = single(0.05);
 cfg.decoder_gain = single(0.1);
 cfg.excitatory_fraction = single(0.5);
 
+% Every task uses conventional bias-corrected AMSGrad: the running maximum
+% is taken over the raw second-moment accumulator, and the current Adam bias
+% correction is applied to that maximum in the parameter update.
+cfg.optimizer = "amsgrad";
 cfg.learning_rate_start = single(5e-2);
 cfg.learning_rate_end = single(1e-3);
 cfg.adam_beta1 = single(0.9);
@@ -89,7 +93,7 @@ cfg.average_fraction = single(0.5);
 cfg.presentation_steps = round(cfg.presentation_time / cfg.dt);
 cfg.average_steps = round(cfg.average_fraction * cfg.presentation_steps);
 cfg.average_start_step = cfg.presentation_steps - cfg.average_steps + 1;
-cfg.batch_size = 32;
+cfg.batch_size = 256;
 cfg.validate_every = 5;
 
 cfg.long_simulation_time = single(2000);
@@ -168,6 +172,7 @@ cfg.method = lower(string(cfg.method));
 cfg.recurrent_mode = lower(string(cfg.recurrent_mode));
 cfg.training_profile = lower(string(cfg.training_profile));
 cfg.eligibility_mode = lower(string(cfg.eligibility_mode));
+cfg.optimizer = lower(string(cfg.optimizer));
 if cfg.recurrent_mode == "full_rank"
     cfg.N_hidden = value_or_override(overrides, 'N_hidden', 6000);
     if cfg.task == "breast_cancer"
@@ -223,6 +228,9 @@ if ~any(cfg.training_profile == ["main" "neuron_sweep"])
 end
 if ~any(cfg.eligibility_mode == ["surrogate" "hard_spike"])
     error('banff:eligibilityMode', 'eligibility_mode must be "surrogate" or "hard_spike".');
+end
+if cfg.optimizer ~= "amsgrad"
+    error('banff:optimizer', 'optimizer must be "amsgrad".');
 end
 
 positiveIntegers = {'N_hidden','N_recurrent','batch_size','epochs', ...

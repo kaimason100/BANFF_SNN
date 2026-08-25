@@ -33,6 +33,12 @@ fprintf('Data: train=%d | validation=%d | test=%d | inputs=%d | outputs=%d\n', .
 P = banff_model('create', ...
     size(data.X_train, 1), size(data.Y_train, 1), cfg);
 P = banff_model('gpu', P);
+% Static datasets are reused every epoch. Transfer them once rather than
+% reconstructing GPU batches from host memory inside each epoch/validation.
+data.X_train = gpuArray(data.X_train);
+data.Y_train = gpuArray(data.Y_train);
+data.X_validation = gpuArray(data.X_validation);
+data.Y_validation = gpuArray(data.Y_validation);
 % Keep sample ordering/SPSA perturbations controlled across network seeds.
 rng(cfg.training_seed, 'twister');
 
@@ -91,8 +97,8 @@ lossSum = gpuArray.zeros(1, 1, 'single');
 correct = gpuArray.zeros(1, 1, 'single');
 for first = 1:cfg.batch_size:sampleCount
     indices = order(first:min(sampleCount, first + cfg.batch_size - 1));
-    X = gpuArray(data.X_train(:, indices));
-    Y = gpuArray(data.Y_train(:, indices));
+    X = data.X_train(:, indices);
+    Y = data.Y_train(:, indices);
     [output, eligibility] = banff_model('static', P, X, true);
     [batchLoss, outputGradient, batchCorrect] = banff_eval('loss', output, Y, cfg.kind);
     lossSum = lossSum + batchLoss;
@@ -213,7 +219,7 @@ end
 
 function result = package_result(cfg, dataInformation, history, best, P, complete)
 result = struct();
-result.version = 'BANFF-SNN publication-ready hard-event v2';
+result.version = 'BANFF-SNN publication-ready hard-event v3';
 result.complete = complete;
 result.config = cfg;
 result.data_information = dataInformation;
@@ -488,6 +494,10 @@ metadata.trainable_parameter = 'hidden bias B only';
 metadata.fixed_parameters = 'input, recurrent and decoder weights';
 metadata.backend = 'MATLAB gpuArray with fused arrayfun kernel';
 metadata.method = char(cfg.method);
+metadata.optimizer = char(cfg.optimizer);
+metadata.optimizer_definition = [ ...
+    'bias-corrected AMSGrad; running maximum of raw second moment, ' ...
+    'followed by current-step second-moment bias correction'];
 metadata.eligibility_mode = char(cfg.eligibility_mode);
 metadata.reset_derivative = 'stop_gradient';
 metadata.rho_derivative = 'stop_gradient';
@@ -510,7 +520,7 @@ end
 
 function provenance = runtime_provenance(cfg)
 provenance = struct();
-provenance.release = 'BANFF-SNN publication-ready hard-event v2';
+provenance.release = 'BANFF-SNN publication-ready hard-event v3';
 provenance.scientific_config_sha256 = cfg.scientific_config_sha256;
 provenance.checkpoint_config_sha256 = cfg.checkpoint_config_sha256;
 provenance.matlab_version = version;

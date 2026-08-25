@@ -20,7 +20,8 @@ bash arc_ucalgary/submit_all.sh
 
 The submitter allows Breast Cancer and the regression tasks onto V100 as well
 as H100/A100/L40. MNIST, Afro-MNIST and the dynamical-system tasks are kept off
-V100.
+V100. These partition lists apply to the initial submission, so Slurm remains
+free to choose the first compatible available partition.
 
 Individual supplementary arrays can be submitted with:
 
@@ -31,7 +32,12 @@ BANFF_ARCHITECTURE=neuron_sweep sbatch --array=1-15 arc_ucalgary/submit_arc.slur
 ```
 
 Each job checkpoints after 23 hours. A checkpoint exits with code 75 and the
-Slurm script requeues the same array item. `submit_arc.slurm` explicitly loads
-`matlab/r2023a` and prints core source hashes plus `nvidia-smi` information.
-Saved result files additionally contain MATLAB/GPU provenance and the
-scientific-configuration fingerprint.
+Slurm wrapper submits a new one-item array for the same task index, restricted
+to the partition that actually ran the checkpointed segment. It is not pinned
+to the same physical node. If the partition cannot be identified or `sbatch`
+fails, the checkpoint is retained and the wrapper exits with an error instead
+of falling back to a multi-partition submission.
+
+`submit_arc.slurm` explicitly loads `matlab/r2023a` and prints core source
+hashes plus `nvidia-smi` information. Saved result files additionally contain
+MATLAB/GPU provenance and the scientific-configuration fingerprint.

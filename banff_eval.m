@@ -23,9 +23,9 @@ regressionOutput = zeros(P.N_output, sampleCount, 'single');
 spikeCount = gpuArray.zeros(P.N_hidden, 1, 'single');
 for first = 1:cfg.batch_size:sampleCount
     indices = first:min(sampleCount, first + cfg.batch_size - 1);
-    targets = gpuArray(Y(:, indices));
+    targets = ensure_gpu(Y(:, indices));
     [output, ~, batchSpikeCount] = banff_model( ...
-        'static', P, gpuArray(X(:, indices)), false, keepOutput);
+        'static', P, ensure_gpu(X(:, indices)), false, keepOutput);
     [batchLoss, ~, batchCorrect] = supervised_loss(output, targets, cfg.kind);
     lossSum = lossSum + batchLoss;
     correct = correct + batchCorrect;
@@ -40,7 +40,11 @@ evaluation.loss = single(gather(lossSum) / sampleCount);
 if cfg.kind == "classification"
     evaluation.metric = single(100 * gather(correct) / sampleCount);
 else
-    correlation = corrcoef(double(regressionOutput(:)), double(Y(:)));
+    targetValues = Y(:);
+    if isa(targetValues, 'gpuArray')
+        targetValues = gather(targetValues);
+    end
+    correlation = corrcoef(double(regressionOutput(:)), double(targetValues));
     if numel(correlation) == 4
         evaluation.metric = single(correlation(1, 2));
     else
@@ -59,6 +63,13 @@ if keepOutput
         'active_fraction_percent', 100 * double(mean(active)), ...
         'calculation', struct('context', 'full held-out test', ...
         'rate_units', 'Hz', 'n_test_samples', sampleCount));
+end
+end
+
+function value = ensure_gpu(value)
+% Keep resident arrays resident while retaining CPU inputs at the public API.
+if ~isa(value, 'gpuArray')
+    value = gpuArray(value);
 end
 end
 
