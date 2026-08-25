@@ -302,26 +302,35 @@ end
 function fig = plot_bias_swarm(results, task, options)
 fig = new_figure(options, task + " learned bias"); hold on;
 colors = lines(numel(results));
+xValues = [];
+biasValues = [];
+pointColors = zeros(0,3);
+medianValues = nan(1,numel(results));
 for index = 1:numel(results)
     values = double(results(index).best.B(:)); values = values(isfinite(values));
     if numel(values) > options.max_bias_points
         take = unique(round(linspace(1,numel(values),options.max_bias_points)));
         values = values(take);
     end
-    x = index + deterministic_jitter(numel(values), .28);
-    scatter(x, values, 7, colors(index,:), 'filled', 'MarkerFaceAlpha', .20, ...
-        'MarkerEdgeAlpha', .20);
-    medianValue = median(values);
-    plot(index+[-.25 .25], [medianValue medianValue], 'k-', 'LineWidth', 1.5);
+    xValues = [xValues; repmat(index,numel(values),1)]; %#ok<AGROW>
+    biasValues = [biasValues; values]; %#ok<AGROW>
+    pointColors = [pointColors; repmat(colors(index,:),numel(values),1)]; %#ok<AGROW>
+    if ~isempty(values), medianValues(index) = median(values); end
+end
+if ~isempty(biasValues)
+    swarmchart(xValues,biasValues,7,pointColors,'filled', ...
+        'XJitter','density','XJitterWidth',.65, ...
+        'MarkerFaceAlpha',.25,'MarkerEdgeAlpha',.20);
+end
+for index = 1:numel(results)
+    if isfinite(medianValues(index))
+        plot(index+[-.25 .25],medianValues(index).*[1 1],'k-','LineWidth',1.5);
+    end
 end
 hold off; grid on; xlim([.5 numel(results)+.5]);
 set(gca,'XTick',1:numel(results),'XTickLabel',arrayfun(@(R) string(R.config.seed),results));
 xlabel('Initialisation seed'); ylabel('Learned hidden bias (mV)');
 title('Learned bias distributions by seed'); save_figure(fig, options, 'learned_bias_swarm.png');
-end
-
-function x = deterministic_jitter(n, width)
-index = (1:n).'; x = width .* (2 .* mod(sin(index.*12.9898).*43758.5453,1)-1);
 end
 
 function figures = plot_classification(results, task, options)
@@ -485,8 +494,9 @@ else
     nexttile; histogram(eventRates,50); grid on; xlabel('Firing rate (Hz)'); ylabel('Active neurons');
     title(sprintf('Event rates; %.2f%% active',100*numel(eventRates)/representative.config.N_hidden));
     nexttile;
-    if isempty(eventIsi), axis off; text(.5,.5,'No repeated-neuron ISIs','HorizontalAlignment','center');
-    else, histogram(eventIsi,50); grid on; xlabel('Inter-spike interval (s)'); ylabel('Intervals'); title('ISI distribution'); end
+    inverseIsiRate = inverse_isi_rate_hz(eventIsi);
+    if isempty(inverseIsiRate), axis off; text(.5,.5,'No repeated-neuron spikes','HorizontalAlignment','center');
+    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Instantaneous rate distribution'); end
     nexttile; rho=double(events.rho(:)); rho=rho(isfinite(rho));
     if isempty(rho), axis off; text(.5,.5,'No recorded spikes','HorizontalAlignment','center');
     else, histogram(rho,40); grid on; xlabel('\rho at spike'); ylabel('Spikes'); title('Within-step event fraction'); end
@@ -526,8 +536,9 @@ try
     traceKeep=keep(1:min(20,numel(keep))); plot(double(voltage(traceKeep,:)).','LineWidth',.7); grid on;
     xlabel('Presentation step'); ylabel('Voltage (mV)'); title('Representative neuron voltages');
     nexttile; isi=spike_isi(spikes(:,:,1),double(result.config.dt));
-    if isempty(isi), axis off; text(.5,.5,'No repeated-neuron ISIs','HorizontalAlignment','center');
-    else, histogram(isi,50); grid on; xlabel('Inter-spike interval (s)'); ylabel('Intervals'); title('ISI distribution'); end
+    inverseIsiRate=inverse_isi_rate_hz(isi);
+    if isempty(inverseIsiRate), axis off; text(.5,.5,'No repeated-neuron spikes','HorizontalAlignment','center');
+    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Instantaneous rate distribution'); end
     nexttile;
     t=double(current.time_seconds); plot(t,double(current.mean_encoder_current),'LineWidth',1.1); hold on;
     plot(t,double(current.mean_recurrent_current),'LineWidth',1.1);
@@ -547,6 +558,15 @@ for neuron=1:size(spikeMatrix,1)
     times=find(spikeMatrix(neuron,:));
     if numel(times)>1, isi=[isi,diff(times).*dt]; end %#ok<AGROW>
 end
+end
+
+function rate = inverse_isi_rate_hz(isi)
+% Convert positive inter-spike intervals in seconds to instantaneous rates.
+% The result is an interval-weighted distribution of 1/ISI and is distinct
+% from the per-neuron mean firing rates shown in the adjacent panels.
+isi=double(isi(:));
+isi=isi(isfinite(isi) & isi>0);
+rate=1./isi;
 end
 
 function [rates,isi] = event_statistics(events,cfg)
@@ -588,7 +608,14 @@ R=results(min(options.representative_seed_index,numel(results)));
 end
 
 function fig = new_figure(options,name)
-fig=figure('Color','w','Name',char(name),'Visible',char(options.figure_visibility));
+properties={'Color','w','Name',char(name)};
+if ~strcmpi(string(options.figure_visibility),"on")
+    % Explicitly hidden figures remain available for headless export. For
+    % visible figures, omitting Visible lets the Live Editor capture the figure
+    % in the .mlx output panel instead of forcing an external figure window.
+    properties=[properties,{'Visible',char(options.figure_visibility)}]; %#ok<AGROW>
+end
+fig=figure(properties{:});
 end
 
 function save_figure(fig,options,filename)

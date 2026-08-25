@@ -12,7 +12,8 @@ the saved seed/model identities and current fixed-network generator, and shows:
 - training and validation histories;
 - learned-bias swarm plots;
 - task-specific held-out plots;
-- firing-rate, active/silent-neuron, raster, ISI, voltage/current (static),
+- firing-rate, active/silent-neuron, raster, inverse-ISI instantaneous-rate,
+  voltage/current (static),
   and event-time sensitivity (dynamics) diagnostics.
 
 Classification scripts add confusion, class-count, confidence, and (for the
