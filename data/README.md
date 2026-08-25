@@ -1,10 +1,7 @@
-# Data Layout
+# Data layout
 
-## External Data
-
-Put external datasets in `data/raw/`.
-
-Expected dataset filenames used by the current scripts:
+The active datasets are stored in `data/raw/` with the exact filenames used by
+`banff_data.m`:
 
 - `breast_cancer_dataset.mat`
 - `abalone_dataset.mat`
@@ -12,28 +9,27 @@ Expected dataset filenames used by the current scripts:
 - `yacht_dataset.mat`
 - `mnist.mat`
 - `afro_mnist_vai.mat`
-- `idx_neuron_FC_plot.mat`
 
-MNIST and Afro-MNIST (Vai) are loaded from local `.mat` files with predefined `training` and `test` structs.
+`banff_data.m` verifies the raw-file SHA-256 whenever a saved trained model is
+reloaded. The publication test suite also checks the distributed dataset hashes.
 
-For tabular regression, normalisation is fitted on the training partition.
-Exact duplicate feature-plus-target rows are assigned as one group, so they
-cannot cross training, validation, and test partitions. The realised split
-indices, split policy, duplicate-group count, and source-file SHA-256 are
-retained in saved metadata; testing reuses those indices and checks the hash.
+## Splits
 
-## Derived Data
+- MNIST and Afro-MNIST keep their official test partitions. The official
+  training set is deterministically split 80/20 into train/validation.
+- Breast Cancer uses a stratified 60/20/20 split while keeping exact
+  feature+label duplicate groups together.
+- Regression datasets use 60/20/20 partitions while keeping exact
+  feature+target duplicate groups together.
 
-- Use `data/raw/` for manually imported intermediate data.
-- Use `data/processed/` for cleaned datasets if you later add preprocessing code.
-- Use `data/derived/` for derived artifacts that are not final paper figures or result bundles.
+The realized indices and split-policy string are saved with every trained
+model. Testing reuses those exact indices.
 
-## Outputs
+## Preprocessing
 
-Active training, testing, ARC checkpointing, and publication analysis write beneath the project `outputs/` directory. The package also provides:
+Feature mean/standard deviation and regression target mean/standard deviation
+are fitted on the training split only. The exact saved statistics are reused
+when testing or rebuilding publication data; the code also checks that they
+remain consistent with the verified raw dataset and saved split.
 
-- `outputs/repro/`
-- `outputs/fc/`
-- `outputs/batch/`
-
-These folders are intended for auxiliary reproducibility, functional-connectivity, and batch artifacts. Use `prepare_run_environment('repro')`, `prepare_run_environment('fc')`, or `prepare_run_environment('batch')` only for scripts that explicitly use those output locations.
+See `../docs/DATA_SOURCES.md` for dataset provenance and citations.

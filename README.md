@@ -1,137 +1,302 @@
 # BANFF SNN
 
-Reproducibility code and data for **Versatile Learning without Synaptic
-Plasticity in a Spiking Neural Network**.
+MATLAB code for **bias-only learning in a fixed-synapse recurrent spiking
+network**. The principal model uses adaptive leaky integrate-and-fire (ALIF)
+neurons, a fixed factorised recurrent scaffold and a fixed linear decoder.
+**Only the per-neuron bias vector is trained.**
 
-This release contains the files required to retrain, evaluate and regenerate
-the analyses and figures reported in the manuscript. Generated models,
-checkpoints, timestamped analyses, compiled MEX binaries, figures, caches,
-archives and unrelated side projects are deliberately not included.
+The repository is deliberately kept small. Training and testing share one
+forward simulator (`banff_model.m`); there are no separate CPU/GPU scientific
+implementations, CUDA files, MEX files, or task-specific training scripts.
+
+## Start here
+
+The scientific core and its compatibility manifest are readable MATLAB files:
+
+- `banff.m` — public entry point and all experiment configuration.
+- `banff_train.m` — training loops, checkpointing and progress reporting.
+- `banff_test.m` — held-out model evaluation.
+- `banff_eval.m` — losses and validation/test protocols shared by train/test.
+- `banff_model.m` — **the single network simulator**: fixed network creation,
+  ALIF/LSTI neuron dynamics, synaptic filtering, eligibility and conventional
+  bias-corrected AMSGrad.
+- `banff_data.m` — datasets, deterministic splits, preprocessing and target
+  dynamical systems.
+- `banff_metrics.m` — classification, regression and phase-portrait metrics.
+- `banff_publication.m` — compact figure-facing export after testing.
+- `banff_provenance.m` — full-source audit metadata and the narrower
+  training-source compatibility boundary.
+
+`run_experiment.m` is a short convenience launcher. `banff_plot.m` is only a
+figure/replay adapter; it calls the readable reference timestep inside
+`banff_model.m` and does not define another neuron model.
+
+The code-side mathematical definition is in
+[`docs/METHODS_ELIGIBILITY.md`](docs/METHODS_ELIGIBILITY.md).
 
 ## Requirements
 
-- MATLAB with the Parallel Computing Toolbox
-- A supported CUDA toolkit and C++ compiler for GPU training
-- Sufficient GPU memory for the 32,000-neuron principal experiments
-- Signal Processing Toolbox for `findpeaks` in the return-map analysis
+- MATLAB R2023a or newer.
+- Parallel Computing Toolbox and a supported NVIDIA GPU for training/testing.
+- The principal 32,000-neuron experiments require substantial GPU memory.
+- Some publication figures additionally use Signal Processing Toolbox and
+  Statistics and Machine Learning Toolbox.
 
-The source was statically reviewed in the release workspace. MATLAB and CUDA
-were not executed as part of preparing this GitHub upload. Exact bitwise
-agreement across MATLAB, CUDA, driver and GPU versions is not expected.
+No CUDA, MEX or C++ source is required.
 
-## Repository contents
+## Principal learning rule
 
-- `Classification/`: Breast Cancer, MNIST and Afro-MNIST (Vai) training and testing
-- `Regression/`: Abalone, Toyota car-price and Yacht training and testing
-- `dynamical_systems/`: Lorenz, Sprott S and Van der Pol training and testing
-- `shared/matlab/`: common model, learning, evaluation and analysis implementation
-- `shared/plotting/publication_figures/`: manuscript figure notebooks
-- `spsa_gpu/`: SPSA proof-of-principle experiments
-- `arc_ucalgary/`: standalone ARC/SLURM reproduction bundle
-- `data/raw/`: exact benchmark MAT files used by the scripts
-- `tests/`: architecture sanity checks
-- `DATA_SOURCES.md`: dataset provenance, licences and hashes
-- `SHA256SUMS`: release-file integrity manifest
-
-## Principal experiments
-
-The manuscript reports three initialisation seeds for each principal task.
-The authoritative batch route is the ARC array:
-
-```bash
-cd arc_ucalgary
-bash submit_preferred_gpu.sh
-```
-
-The array order is:
-
-1. Breast Cancer classification
-2. MNIST classification
-3. Afro-MNIST Vai classification
-4. Abalone regression
-5. Toyota car-price regression
-6. Yacht regression
-7. Lorenz dynamics
-8. Sprott S dynamics
-9. Van der Pol dynamics
-
-Each task runs seeds 1, 2 and 3. The ARC README documents array indices,
-checkpoint/resume behaviour and deliberate environment overrides.
-
-For a local run, open MATLAB in the repository root and run:
+The publication default is
 
 ```matlab
-setup_project_paths
+cfg.eligibility_mode = "hard_spike";
+cfg.hard_event_gain = single(1);  % 1/mV
 ```
 
-Compile the current CUDA sources using the appropriate Live Editor build
-notebook:
+For the local bias-sensitivity state
 
-- `Classification/build/compile_classification_gpu_mex.mlx`
-- `Regression/build/compile_regression_gpu_mex.mlx`
-- `dynamical_systems/build/compile_dynamical_systems_gpu_mex.mlx`
+\[
+\epsilon^u=\partial u/\partial B,\qquad
+\epsilon^w=\partial w/\partial B,
+\]
 
-Then run the matching `GPU_implementation_*.mlx` training notebook. Run it
-once for each required `opts.seed` value. Training writes seed-specific files
-under `outputs/models/`; that directory is intentionally generated locally.
+the complete coupled membrane sensitivity is propagated as
 
-## Evaluation and analysis
+\[
+\epsilon^u_{new}
+=a\epsilon^u_{old}+(1-a)(1-\epsilon^w_{old}).
+\]
 
-After all required models have been generated, run the corresponding
-`TEST_GPU_implementation_*.mlx` notebook. Principal-task test notebooks load
-seeds 1, 2 and 3, restore the validation-selected bias vector, reuse the saved
-partition/preprocessing metadata and save publication-analysis MAT files under
-`outputs/publication_analysis/`.
+At a real LSTI spike, the sensitivity is first propagated to the inferred
+event time \(\rho\). The raw event eligibility is
 
-Before accepting GPU results, run:
+\[
+e^{raw}=s\,\phi\,\epsilon^{u,-},\qquad
+\phi=1\;\mathrm{mV}^{-1}.
+\]
 
-- `Classification/test/CHECK_GPU_vs_CPU_classification_small.mlx`
-- `Regression/test/CHECK_GPU_vs_CPU_regression_small.mlx`
-- `dynamical_systems/test/CHECK_GPU_vs_CPU_dynamical_systems_small.mlx`
-- `tests/run_architecture_sanity_tests.m`
+The reset branch and \(\rho\) are treated as stop-gradient. The same event is
+inserted at \(\rho\) into the two-stage rise-decay eligibility filter matched
+to the decoder's filtered-spike state. A non-spiking timestep still propagates
+the local membrane/adaptation sensitivities and decays the eligibility states,
+but injects no new hard event.
 
-These checks are tolerance-based, not bitwise-equivalence claims.
+This is an **event-gated e-prop-style rule for intrinsic bias plasticity**. It
+should not be described as the canonical Bellec synaptic ALIF eligibility
+formula.
 
-## Supplementary experiments
+### Optional continuous-surrogate ablation
 
-- Full-rank 6,000-neuron proofs: `arc_ucalgary/submit_arc_full_rank6k_array.slurm`
-- Lorenz neuron-count sweep: `arc_ucalgary/submit_arc_lorenz_neuron_sweep_array.slurm`
-- Breast Cancer/Yacht neuron-count sweeps: `arc_ucalgary/submit_arc_static_neuron_sweeps_array.slurm`
-- SPSA proofs: `spsa_gpu/arc/submit_spsa_gpu_array.slurm`
+For comparison only:
 
-The ordinary 32,000-neuron principal models provide the 32k points in the
-neuron-count panels.
+```matlab
+options.eligibility_mode = "surrogate";
+options.surrogate_peak = single(0.7);       % 1/mV
+options.surrogate_half_width = single(10);  % mV
+```
 
-## Figure regeneration
+These values are inactive in hard-spike mode and therefore do not change the
+hard-spike scientific-configuration fingerprint.
 
-Run the full test notebooks first so that current analysis files exist. Then
-use the notebooks in `shared/plotting/publication_figures/`:
+## Running experiments
 
-- Figure 1: `plot_flowchart_publication_figure.mlx`
-- Figure 2 activity panels: `plot_neural_activity_publication_panels.mlx`
-- Figure 3 timing redistribution: `analyse_jitter.mlx`, then `plot_jitter.mlx`
-- Supplementary Figures 1-3: `plot_phase_portraits_return_maps_poincare_sections.mlx`
-- Supplementary Figure 4: `plot_full_rank_publication_figure.mlx`
-- Supplementary Figure 5: `plot_spsa_publication_figure.mlx`
-- Supplementary Figure 6: `plot_lorenz_neuron_count_publication.mlx`
-- Supplementary Figure 7: `plot_dynamics_ic_variation_publication.mlx`
+Principal 32k low-rank experiment, three seeds:
 
-Publication loaders currently select the newest matching complete analysis
-file. For an archival release, record and verify the selected file hashes in
-addition to the repository commit.
+```matlab
+run_experiment("train", "lorenz", "main", 1:3);
+results = run_experiment("test", "lorenz", "main", 1:3);
+analysisFile = banff_publication(results);
+```
 
-## Reproducibility boundaries
+Other profiles:
 
-- Only the hidden-neuron bias vector is trained in the main experiments.
-- The main learning rule is an approximate e-prop-style local
-  surrogate-gradient rule, not exact BPTT.
-- Toyota models produced before duplicate-grouped splitting must not be reused.
-- Dynamical-system validation and final-test initial conditions use separate
-  seeds and are checked for exact overlap.
-- Compiled binaries are not distributed; build them from the included CUDA
-  sources so the executable corresponds to this release.
+```matlab
+run_experiment("train", "yacht", "full_rank", 1);
+run_experiment("train", "breast_cancer", "spsa", 1);
+run_experiment("train", "vanderpol", "neuron_sweep", 1, ...
+    struct('N_hidden', 8000));
+```
 
-Third-party attribution is recorded in `THIRD_PARTY_NOTICES.md` and
-`DATA_SOURCES.md`. No licence for the authors' original source code is granted
-by this release unless a separate `LICENSE` file is added by the copyright
-holders.
+Available tasks:
+
+`breast_cancer`, `mnist`, `afro_mnist_vai`, `abalone`, `toyota`, `yacht`,
+`lorenz`, `sprott_s`, `vanderpol`.
+
+Inspect the complete resolved configuration without requiring a GPU:
+
+```matlab
+cfg = banff("config", "lorenz", struct());
+```
+
+## Main epoch counts
+
+| Task | Main e-prop epochs |
+|---|---:|
+| Breast Cancer | 5,000 |
+| MNIST | 1,000 |
+| Afro-MNIST (Vai) | 1,000 |
+| Abalone | 25,000 |
+| Toyota | 25,000 |
+| Yacht | 25,000 |
+| Lorenz | 60,000 |
+| Sprott S | 60,000 |
+| Van der Pol | 60,000 |
+
+Supplementary full-rank, SPSA and neuron-sweep overrides are centralised in
+`banff.m` rather than hidden in separate scripts.
+All dynamical-system profiles now default to 60,000 epochs unless an explicit
+`epochs` override is supplied.
+
+The breast-cancer SPSA control is one continuous 50,000-epoch optimisation.
+Its learning-rate and SPSA-perturbation schedules both span all 50,000 epochs;
+the optimiser state is not reset during training.
+
+## Static-task training semantics
+
+`batch_size=256` is a **GPU memory batch**, not an optimiser minibatch. Gradients
+are accumulated over the complete training set and one conventional AMSGrad
+update is performed per epoch. The running maximum is taken over the raw
+second-moment accumulator before applying the current Adam bias correction.
+Static training and validation arrays remain GPU-resident;
+the batch size therefore controls simulator-state memory rather than repeated
+host-to-device transfers.
+
+The static simulator averages the filtered hidden state over the readout window
+before applying the linear decoder. The dynamics simulator precomputes encoder
+currents for contiguous teacher-forced blocks, fuses current components inside
+the element-wise neuron kernel, and omits trajectory storage when callers request
+only loss and gradient. These reorderings retain the same model equations but
+may produce normal single-precision reduction-order differences.
+
+Feature normalisation and regression-target normalisation are fitted only on
+the training partition. Exact duplicate feature-target rows are kept in one
+split. Saved split indices and normalisation statistics are replayed at test
+time, and raw dataset contents are protected by SHA-256 checks.
+
+## Dynamical-system protocol
+
+Each epoch samples one contiguous normalised target-system window. Inputs use a
+30 ms teacher-forced / 55 ms closed-loop repeating schedule, while supervision
+always remains the next reference state. Validation is fully closed loop after
+the same 5 s network-only warmup used for final testing and selects the bias
+vector with the lowest phase-portrait sliced-Wasserstein score. The matched
+true trajectory starts from the terminal network output after that warmup.
+
+For dynamical-system evaluation, `initial_condition_jitter` is the maximum
+absolute per-coordinate perturbation: random initial conditions are sampled
+uniformly from `[-initial_condition_jitter,+initial_condition_jitter]` around
+the reference state. Burn-in is endpoint-inclusive and retains the sample at
+exactly `burn_in_time`.
+
+## Reproducibility
+
+A model filename contains a 12-character SHA-256 fingerprint of its scientific
+configuration. Saved results also contain the full resolved configuration,
+seed-independent scientific fingerprint, checkpoint fingerprint, MATLAB/GPU
+information, dataset/split metadata and SHA-256 hashes of the scientific core.
+
+Checkpoint continuation is refused if either the checkpoint configuration or
+training-source hashes differ. Testing likewise refuses to evaluate a model
+when its training-source signature differs from the source used during
+training. Test orchestration, publication export, Live Scripts and plotting
+code are recorded for provenance but may change after training.
+The compatibility-critical source set is explicitly listed in
+`banff_provenance.m`; changing files outside that set does not invalidate a
+trained result.
+
+## Tests
+
+There is deliberately **one test file**, not a separate test framework:
+
+```matlab
+addpath('tests');
+run_tests("quick");
+```
+
+Before final manuscript runs on ARC:
+
+```matlab
+run_tests("full");
+```
+
+The quick checks cover data hashes/splits, the factorised recurrent operator,
+the corrected local-state finite-difference derivative, LSTI event-time
+sensitivity, phase metric and target-system integration. The full checks add
+CPU/GPU execution agreement for the shared scalar timestep, checkpoint/restart,
+all nine train/test smoke paths, and tiny surrogate/full-rank/SPSA checks.
+
+## Publication figures
+
+The plotting **layouts, labels, axes and styling were restored from the
+original reference repository supplied during the code audit**. They are plain `.m`
+files in `figures/scripts/` so the plotting code is readable and diffable.
+Only data-loading/replay plumbing was adapted to the compact publication result
+format.
+
+Figure loaders accept schema-5 exports from this release and verify the saved
+scientific fingerprint across seeds, so older analyses cannot be selected in
+place of updated-model results.
+
+The one intentional scientific exception is `plot_ALIF_dynamics.m`: its
+original stimulus and visual layout are retained, but the traces are generated
+by the corrected `banff_model` equations rather than reproducing the obsolete
+historical eligibility recurrence.
+
+Copies of the original generated figure images are included unchanged in
+`figures/reference_original/` for visual comparison.
+
+Workflow:
+
+```matlab
+results = run_experiment("test", "lorenz", "main", 1:3);
+banff_publication(results);
+% Then run the required script in figures/scripts/
+```
+
+## Repository layout
+
+```text
+BANFF_SNN/
+├── README.md
+├── banff.m
+├── banff_train.m
+├── banff_test.m
+├── banff_eval.m
+├── banff_model.m
+├── banff_data.m
+├── banff_metrics.m
+├── banff_publication.m
+├── banff_provenance.m
+├── banff_plot.m
+├── run_experiment.m
+├── tests/run_tests.m
+├── examples/simulate_random_network_activity.m
+├── data/
+├── arc_ucalgary/
+├── figures/
+└── docs/
+```
+
+Task-specific held-out evaluation Live Scripts are in `evaluation/`. They use
+the current publication API and architecture while restoring task-specific
+tables, plots and spiking diagnostics.
+
+## ARC / University of Calgary
+
+From the repository root:
+
+```bash
+bash arc_ucalgary/submit_all.sh
+```
+
+The Slurm job loads MATLAB R2023a, prints source hashes/GPU information and
+resubmits a checkpointed item only to the partition that ran its first segment,
+while retaining the multi-partition hierarchy for initial submissions. See
+`arc_ucalgary/README_SIMPLIFIED.md`.
+
+## Public release
+
+Dataset provenance is documented in `docs/DATA_SOURCES.md`; third-party notices
+are in `docs/THIRD_PARTY_NOTICES.md`. This package does not choose a software
+licence or author list on your behalf; add the final `LICENSE`, citation/DOI and
+manuscript-specific metadata before public deposition.

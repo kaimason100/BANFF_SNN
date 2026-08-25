@@ -1,0 +1,7 @@
+% Preamble requirement: \usepackage{svg}
+\begin{figure*}[t]
+    \centering
+    \includesvg[width=\textwidth]{generated_full_rank_figure/full_rank_network_publication_figure}
+    \caption{Sparse full-rank recurrent-network proof experiments. (A) The binned recurrent connection-density map for the Van der Pol network shows sparse, distributed connectivity. The adjacent certificate reports the structural rank of the recurrent connectivity pattern relative to the number of hidden neurons, the realised edge density, and the absence of self-connections. Because nonzero weights are continuously sampled, a full structural rank implies full numerical rank with probability one. (B) Closed-loop Van der Pol phase portraits and the corresponding post-warmup time series for the network and true system. (C) Distributions of neuron-wise mean firing rates over the complete held-out test set (static tasks) or complete post-warmup closed-loop test trajectory (Van der Pol); silent neurons are excluded because the rate axis is logarithmic. Black bars indicate medians. (D) Active-neuron fractions for each full-rank task; points are individual saved network seeds, bars are means, and error bars indicate standard deviations when more than one seed is available.}
+    \label{fig:full-rank-proof-networks}
+\end{figure*}
