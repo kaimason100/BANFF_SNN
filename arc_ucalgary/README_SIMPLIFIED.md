@@ -5,7 +5,7 @@ local package. No CUDA compiler or MEX build is required. The principal e-prop
 jobs use the default `hard_spike` event-gated eligibility rule defined in
 `docs/METHODS_ELIGIBILITY.md`.
 
-Each job requests one GPU, eight CPU cores and 16 GB of host RAM. GPU memory is
+Each job requests one GPU, four CPU cores and 16 GB of host RAM. GPU memory is
 allocated with the selected V100/L40/A100/H100 device and is separate from the
 Slurm host-memory request.
 
