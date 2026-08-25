@@ -30,6 +30,8 @@ run(@test_full_state_finite_difference, 'full local-state finite difference');
 run(@test_lsti_event_sensitivity, 'LSTI event-time sensitivity');
 run(@test_canonical_amsgrad, 'canonical AMSGrad update');
 run(@test_phase_metric_identity, 'phase metric identity');
+run(@test_phase_metric_shape_rejection, 'phase metric shape rejection');
+run(@test_training_provenance_scope, 'training provenance compatibility scope');
 run(@test_target_integrator_refinement, 'target integrator refinement');
 run(@test_dynamics_burn_in_and_jitter, 'dynamics burn-in and IC jitter conventions');
 if mode == "full"
@@ -70,6 +72,15 @@ assert(abs(double(cfg.initial_bias) - 20) < 1e-12);
 assert(cfg.N_hidden == 32000 && cfg.N_recurrent == 10);
 assert(cfg.batch_size == 256);
 assert(cfg.optimizer == "amsgrad");
+assert(cfg.epochs == 60000);
+assert(cfg.validation_warmup_time == cfg.test_warmup_time);
+for task = ["lorenz" "sprott_s" "vanderpol"]
+    dynamicsCfg = banff("config",task,struct());
+    assert(dynamicsCfg.epochs == 60000);
+    assert(dynamicsCfg.validation_warmup_time == dynamicsCfg.test_warmup_time);
+end
+spsaDynamics = banff("config","vanderpol",struct('method',"spsa"));
+assert(spsaDynamics.epochs == 60000);
 spsa = banff("config", "breast_cancer", struct('method', "spsa"));
 assert(spsa.epochs == 50000);
 assert(spsa.spsa_schedule_epochs == 50000);
@@ -245,6 +256,39 @@ for mode = ["hard_spike" "surrogate"]
 end
 end
 
+function test_phase_metric_shape_rejection()
+cfg = banff("config", "lorenz", struct());
+prediction = single(zeros(10,3));
+truth = single(zeros(9,3));
+threw = false;
+try
+    banff_metrics('phase_distance',prediction,truth,cfg.phase_metric);
+catch ME
+    threw = strcmp(ME.identifier,'banff:phaseShapeMismatch');
+end
+assert(threw,'A trajectory-length mismatch was not rejected.');
+
+truth = single(zeros(10,2));
+threw = false;
+try
+    banff_metrics('phase_distance',prediction,truth,cfg.phase_metric);
+catch ME
+    threw = strcmp(ME.identifier,'banff:phaseShapeMismatch');
+end
+assert(threw,'A trajectory-dimension mismatch was not rejected.');
+end
+
+function test_training_provenance_scope()
+training = banff_provenance("training");
+expected = sort({'banff_train_m','banff_eval_m','banff_model_m', ...
+    'banff_data_m','banff_metrics_m'});
+assert(isequal(sort(fieldnames(training)).',expected));
+assert(~isfield(training,'banff_test_m'));
+assert(~isfield(training,'banff_publication_m'));
+assert(banff_provenance("assert_training_compatible", ...
+    struct('training_source_sha256',training)));
+end
+
 function test_canonical_amsgrad()
 cfg = banff("config", "lorenz", struct( ...
     'N_hidden',2,'N_recurrent',1,'initial_bias',single(0), ...
@@ -372,6 +416,7 @@ for task = tasks
         o.training_window = single(.02);
         o.validation_time = single(.02);
         o.test_time = single(.02);
+        o.validation_warmup_time = single(.005);
         o.test_warmup_time = single(.005);
         o.validation_initial_conditions = 1;
         o.test_initial_conditions = 1;

@@ -1,4 +1,4 @@
-%% Lorenz neuron-count scaling figure
+%% Van der Pol neuron-count scaling figure
 % Render saved, tested neuron-sweep results. The script requires the complete
 % initial-condition protocol so network-size comparisons share evaluation data.
 
@@ -18,7 +18,7 @@ load_opts.example_seed_index = example_seed_index;
 load_opts.network_seed_index = 1;
 load_opts.required_test_ic_count = required_test_ic_count;
 load_opts.require_complete_test_ics = require_complete_test_ics;
-lorenz_sweep = load_lorenz_neuron_sweep_publication_data(load_opts);
+vanderpol_sweep = load_vanderpol_neuron_sweep_publication_data(load_opts);
 bc_sweep = load_static_neuron_sweep_publication_data('classification_BC', load_opts);
 yacht_sweep = load_static_neuron_sweep_publication_data('regression_yacht', load_opts);
 
@@ -95,8 +95,8 @@ plot_opts.pearson_figure_title = 'Yacht Pearson r';
 plot_opts.rmse_figure_title = 'Yacht RMSE';
 % A single space deliberately suppresses the renderer's default title.
 plot_opts.combined_figure_title = ' ';
-plot_opts.combined_wd_title = 'Lorenz WD';
-plot_opts.combined_phase_title = 'Lorenz phase portraits';
+plot_opts.combined_wd_title = 'Van der Pol WD';
+plot_opts.combined_phase_title = 'Van der Pol phase portraits';
 plot_opts.combined_phase_title_font_size = 12;
 plot_opts.combined_accuracy_title = 'Breast-cancer accuracy';
 plot_opts.combined_pearson_title = 'Yacht Pearson r';
@@ -127,11 +127,11 @@ export_dir = fullfile(repo_root, 'outputs', 'figures', 'generated_neuron_sweep_f
 export_dpi = 500;
 export_format = 'png';
 
-figures = plot_lorenz_neuron_sweep_publication(lorenz_sweep, plot_opts);
+figures = plot_vanderpol_neuron_sweep_publication(vanderpol_sweep, plot_opts);
 if export_enable
     export_neuron_sweep_figures(figures, export_dir, export_format, export_dpi);
 end
-fprintf('Displayed Lorenz phase/WD, breast-cancer accuracy, Yacht regression, and combined neuron-sweep figures.\n');
+fprintf('Displayed Van der Pol phase/WD, breast-cancer accuracy, Yacht regression, and combined neuron-sweep figures.\n');
 
 function export_neuron_sweep_figures(figures, output_dir, format, dpi)
 if exist(output_dir, 'dir') ~= 7, mkdir(output_dir); end
@@ -144,7 +144,7 @@ for ii = 1:numel(names)
         case 'svg'
             print(figures.(names{ii}), file, '-dsvg');
         otherwise
-            error('plot_lorenz_neuron_count_publication:unsupportedExportFormat', ...
+            error('plot_vanderpol_neuron_count_publication:unsupportedExportFormat', ...
                 'Supported export formats are png and svg.');
     end
 end

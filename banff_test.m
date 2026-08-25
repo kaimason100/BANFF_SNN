@@ -5,23 +5,11 @@ end
 loaded = load(cfg.model_file, 'result');
 trained = loaded.result;
 cfg = trained.config;
-if ~isfield(trained, 'provenance') || ...
-        ~isfield(trained.provenance, 'core_source_sha256')
+if ~isfield(trained, 'provenance')
     error('banff:modelProvenanceMissing', ...
         'The trained result does not contain source-code provenance. Retrain with this release.');
 end
-currentSource = core_source_hashes();
-trainedSource = trained.provenance.core_source_sha256;
-criticalFields = {'banff_model_m','banff_data_m','banff_eval_m','banff_metrics_m'};
-for sourceIndex = 1:numel(criticalFields)
-    field = criticalFields{sourceIndex};
-    if ~isfield(trainedSource, field) || ...
-            ~strcmp(trainedSource.(field), currentSource.(field))
-        error('banff:modelSourceMismatch', ...
-            ['The trained result was produced with different mathematical source code ', ...
-             '(mismatch in %s). Retrain or test with the source that created the model.'], field);
-    end
-end
+banff_provenance("assert_training_compatible", trained.provenance);
 if cfg.kind == "dynamics"
     dimension = numel(trained.data_information.mean);
     P = banff_model('gpu', banff_model('create', dimension, dimension, cfg));
@@ -44,29 +32,9 @@ end
 result = trained;
 result.test = test;
 result.tested_at = char(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss Z'));
-end
-
-function sourceHashes = core_source_hashes()
-root = fileparts(mfilename('fullpath'));
-files = {'banff.m','banff_train.m','banff_test.m','banff_eval.m', ...
-    'banff_model.m','banff_data.m','banff_metrics.m'};
-sourceHashes = struct();
-for index = 1:numel(files)
-    field = matlab.lang.makeValidName(files{index});
-    sourceHashes.(field) = sha256_file(fullfile(root,files{index}));
-end
-end
-
-function hash = sha256_file(file)
-engine = javaMethod('getInstance','java.security.MessageDigest','SHA-256');
-fid = fopen(file,'r');
-if fid < 0, error('banff:sourceHash','Could not open %s.',file); end
-cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
-while true
-    bytes = fread(fid,1024*1024,'*uint8');
-    if isempty(bytes), break; end
-    engine.update(bytes);
-end
-digest = typecast(engine.digest(),'uint8');
-hash = lower(reshape(dec2hex(digest).',1,[]));
+% Record the exact test/publication-era source without making it part of the
+% trained-model compatibility decision.
+result.test_provenance = struct( ...
+    'current_source_sha256', banff_provenance("all"), ...
+    'training_source_sha256', banff_provenance("training"));
 end

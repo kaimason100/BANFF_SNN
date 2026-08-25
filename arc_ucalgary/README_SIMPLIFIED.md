@@ -31,6 +31,9 @@ BANFF_ARCHITECTURE=spsa sbatch --array=1-3 arc_ucalgary/submit_arc.slurm
 BANFF_ARCHITECTURE=neuron_sweep sbatch --array=1-15 arc_ucalgary/submit_arc.slurm
 ```
 
+Neuron-sweep items 1-5 are Breast Cancer, 6-10 are Yacht, and 11-15 are
+Van der Pol; within each task the sizes are 1k, 2k, 4k, 8k and 16k neurons.
+
 Each job checkpoints after 23 hours. A checkpoint exits with code 75 and the
 Slurm wrapper submits a new one-item array for the same task index, restricted
 to the partition that actually ran the checkpointed segment. It is not pinned

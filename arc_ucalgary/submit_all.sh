@@ -24,6 +24,6 @@ sbatch --export=ALL,BANFF_ARCHITECTURE=full_rank --partition="${fast_partitions}
 sbatch --export=ALL,BANFF_ARCHITECTURE=spsa --partition="${static_partitions}" --array=1-2 "${script}"
 sbatch --export=ALL,BANFF_ARCHITECTURE=spsa --partition="${fast_partitions}" --array=3 "${script}"
 
-# Neuron sweep: Breast Cancer/Yacht (1-10) may use V100; Lorenz (11-15) may not.
+# Neuron sweep: Breast Cancer/Yacht (1-10) may use V100; Van der Pol (11-15) may not.
 sbatch --export=ALL,BANFF_ARCHITECTURE=neuron_sweep --partition="${static_partitions}" --array=1-10 "${script}"
 sbatch --export=ALL,BANFF_ARCHITECTURE=neuron_sweep --partition="${fast_partitions}" --array=11-15 "${script}"

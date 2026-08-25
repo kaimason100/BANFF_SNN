@@ -137,9 +137,12 @@ for index = 1:size(initialConditions, 2)
         prediction = output.';
         truth = reference(:, 2:end).';
     end
-    common = min(size(prediction, 1), size(truth, 1));
-    prediction = prediction(1:common, :);
-    truth = truth(1:common, :);
+    if ~isequal(size(prediction), size(truth))
+        error('banff:trajectoryShapeMismatch', ...
+            ['Closed-loop prediction and reference must have identical ', ...
+             'length and state dimension; received [%s] and [%s].'], ...
+            num2str(size(prediction)), num2str(size(truth)));
+    end
     distances(index) = banff_metrics('phase_distance', ...
         prediction, truth, cfg.phase_metric);
     predictions{index} = prediction;

@@ -263,11 +263,28 @@ if ~isfield(checkpoint.config,'checkpoint_config_sha256') || ...
     error('banff:checkpointMismatch', ...
         'Checkpoint scientific settings do not match the requested experiment.');
 end
-currentSource = core_source_hashes();
-if ~isfield(checkpoint, 'core_source_sha256') || ...
-        ~isequal(checkpoint.core_source_sha256, currentSource)
+currentSource = banff_provenance("training");
+if isfield(checkpoint, 'training_source_sha256')
+    savedSource = checkpoint.training_source_sha256;
+elseif isfield(checkpoint, 'core_source_sha256')
+    % Legacy checkpoints used the complete core-source structure.
+    savedSource = checkpoint.core_source_sha256;
+else
+    savedSource = struct();
+end
+currentFields = fieldnames(currentSource);
+sourceMatches = all(isfield(savedSource, currentFields));
+for sourceIndex = 1:numel(currentFields)
+    field = currentFields{sourceIndex};
+    if ~isfield(savedSource, field) || ...
+            ~strcmp(savedSource.(field), currentSource.(field))
+        sourceMatches = false;
+        break;
+    end
+end
+if ~sourceMatches
     error('banff:checkpointSourceMismatch', ...
-        ['Checkpoint was created by different core source code. Delete the checkpoint ', ...
+        ['Checkpoint was created by different training source code. Delete the checkpoint ', ...
          'or resume with the exact source version that created it.']);
 end
 P.B = gpuArray(single(checkpoint.state.B));
@@ -286,7 +303,8 @@ function save_checkpoint(file, P, history, best, epoch, cfg)
 ensure_directory(fileparts(file));
 checkpoint = struct('epoch', epoch, 'state', banff_model('gather', P), ...
     'history', history, 'best', best, 'config', cfg, 'random_state', rng, ...
-    'core_source_sha256', core_source_hashes());
+    'training_source_sha256', banff_provenance("training"), ...
+    'core_source_sha256', banff_provenance("all"));
 save(file, 'checkpoint', '-v7.3');
 end
 
@@ -540,38 +558,6 @@ try
 catch ME
     provenance.gpu.error = ME.message;
 end
-provenance.core_source_sha256 = core_source_hashes();
-end
-
-function sourceHashes = core_source_hashes()
-% Hash only the small scientific core. Figure scripts and documentation may
-% change without invalidating a trained model or checkpoint.
-root = fileparts(mfilename('fullpath'));
-files = {'banff.m','banff_train.m','banff_test.m','banff_eval.m', ...
-    'banff_model.m','banff_data.m','banff_metrics.m'};
-sourceHashes = struct();
-for index = 1:numel(files)
-    field = matlab.lang.makeValidName(files{index});
-    sourceHashes.(field) = file_sha256_local(fullfile(root, files{index}));
-end
-end
-
-function hash = file_sha256_local(file)
-hash = '';
-if exist(file, 'file') ~= 2
-    return;
-end
-engine = javaMethod('getInstance', 'java.security.MessageDigest', 'SHA-256');
-fileId = fopen(file, 'r');
-if fileId < 0
-    return;
-end
-cleanup = onCleanup(@() fclose(fileId)); %#ok<NASGU>
-while true
-    bytes = fread(fileId, 1024 * 1024, '*uint8');
-    if isempty(bytes), break; end
-    engine.update(bytes);
-end
-digest = typecast(engine.digest(), 'uint8');
-hash = lower(reshape(dec2hex(digest).', 1, []));
+provenance.training_source_sha256 = banff_provenance("training");
+provenance.core_source_sha256 = banff_provenance("all");
 end

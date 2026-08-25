@@ -427,7 +427,11 @@ save_figure(fig, options, 'phase_distance_by_initial_condition.png'); figures(en
 representative = pick_result(results,options);
 for ic=1:numel(representative.test.prediction)
     prediction=double(representative.test.prediction{ic}); truth=double(representative.test.truth{ic});
-    n=min(size(prediction,1),size(truth,1)); prediction=prediction(1:n,:); truth=truth(1:n,:);
+    if ~isequal(size(prediction),size(truth))
+        error('banff:evaluationTrajectoryShape', ...
+            'Saved prediction and truth trajectories have different shapes.');
+    end
+    n=size(prediction,1);
     time=(0:n-1).'*double(representative.config.dt);
     fig = new_figure(options, sprintf('%s time series IC %d',task,ic));
     tiledlayout(size(truth,2),1,'TileSpacing','compact','Padding','compact');
@@ -485,7 +489,7 @@ else
     else, histogram(eventIsi,50); grid on; xlabel('Inter-spike interval (s)'); ylabel('Intervals'); title('ISI distribution'); end
     nexttile; rho=double(events.rho(:)); rho=rho(isfinite(rho));
     if isempty(rho), axis off; text(.5,.5,'No recorded spikes','HorizontalAlignment','center');
-    else, histogram(rho,40); grid on; xlabel('\rho at spike'); ylabel('Spikes'); title('Event-time sensitivity'); end
+    else, histogram(rho,40); grid on; xlabel('\rho at spike'); ylabel('Spikes'); title('Within-step event fraction'); end
     fprintf('Representative dynamics seed %g: %.2f%% active, %.2f%% silent neurons; %d spikes.\n', ...
         representative.config.seed,100*numel(eventRates)/representative.config.N_hidden, ...
         100*(1-numel(eventRates)/representative.config.N_hidden),numel(events.step));
@@ -549,7 +553,16 @@ function [rates,isi] = event_statistics(events,cfg)
 neuron=double(events.neuron(:)); step=double(events.step(:));
 if isempty(neuron), rates=[]; isi=[]; return; end
 [uniqueNeuron,~,group]=unique(neuron); counts=accumarray(group,1);
-duration=max(1,double(max(step)))*double(cfg.dt); rates=counts./duration; isi=[];
+% Events cover both the autonomous warmup and scored test interval. Use the
+% complete simulated duration rather than the final spike time, which would
+% overestimate rates whenever activity stops before the last step.
+recordingSteps=round((double(cfg.test_warmup_time)+double(cfg.test_time)) ...
+    /double(cfg.dt));
+if any(step < 1 | step > recordingSteps)
+    error('banff:evaluationEventStep', ...
+        'A recorded spike lies outside the configured evaluation interval.');
+end
+duration=max(1,recordingSteps)*double(cfg.dt); rates=counts./duration; isi=[];
 for index=1:numel(uniqueNeuron)
     times=sort(step(group==index));
     if numel(times)>1, isi=[isi;diff(times).*double(cfg.dt)]; end %#ok<AGROW>

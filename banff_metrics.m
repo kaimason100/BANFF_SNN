@@ -47,12 +47,18 @@ function distance = phase_distance(prediction, truth, options)
 prediction = double(prediction);
 truth = double(truth);
 validate_phase_options(options);
+if ~isequal(size(prediction), size(truth))
+    error('banff:phaseShapeMismatch', ...
+        ['Phase-distance trajectories must have identical length and state ', ...
+         'dimension; received [%s] and [%s].'], ...
+        num2str(size(prediction)), num2str(size(truth)));
+end
 if any(~isfinite(prediction), 'all') || any(~isfinite(truth), 'all') || ...
         size(prediction, 1) < 2 || size(truth, 1) < 2
     distance = Inf;
     return;
 end
-dimension = min(size(prediction, 2), size(truth, 2));
+dimension = size(prediction, 2);
 if dimension >= 2
     pairs = nchoosek(1:dimension, 2);
 else

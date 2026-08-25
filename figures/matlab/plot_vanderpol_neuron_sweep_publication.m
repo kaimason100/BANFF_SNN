@@ -1,21 +1,21 @@
-% Package orientation: Publication renderer for the Lorenz, Yacht, and BC neuron sweeps.
+% Package orientation: Renderer for Van der Pol, Yacht, and BC neuron sweeps.
 
-function figures = plot_lorenz_neuron_sweep_publication(lorenz_sweep, opts)
-%PLOT_LORENZ_NEURON_SWEEP_PUBLICATION Render all neuron-sweep publication panels.
+function figures = plot_vanderpol_neuron_sweep_publication(vanderpol_sweep, opts)
+%PLOT_VANDERPOL_NEURON_SWEEP_PUBLICATION Render neuron-sweep panels.
 % opts.classification_sweep and opts.regression_sweep are the corresponding
 % saved breast-cancer and Yacht sweep summaries.
 
 if nargin < 2 || isempty(opts), opts = struct(); end
 bc_sweep = required_opt(opts, 'classification_sweep');
 yacht_sweep = required_opt(opts, 'regression_sweep');
-prepared = prepare_phase_conditions(lorenz_sweep, opts);
+prepared = prepare_phase_conditions(vanderpol_sweep, opts);
 
 figures = struct();
-figures.phase_portraits = plot_phase_figure(lorenz_sweep, prepared, opts);
-figures.wasserstein_swarm = plot_wd_figure(lorenz_sweep, opts);
+figures.phase_portraits = plot_phase_figure(vanderpol_sweep, prepared, opts);
+figures.wasserstein_swarm = plot_wd_figure(vanderpol_sweep, opts);
 figures.classification_accuracy = plot_accuracy_figure(bc_sweep, opts);
 figures.regression_performance = plot_regression_figure(yacht_sweep, opts);
-figures.combined = plot_combined_figure(lorenz_sweep, prepared, bc_sweep, yacht_sweep, opts);
+figures.combined = plot_combined_figure(vanderpol_sweep, prepared, bc_sweep, yacht_sweep, opts);
 end
 
 function prepared = prepare_phase_conditions(sweep, opts)
@@ -23,10 +23,14 @@ prepared = repmat(struct('pred', [], 'truth', []), 1, numel(sweep.conditions));
 for ii = 1:numel(sweep.conditions)
     pred = double(sweep.conditions(ii).pred_norm);
     truth = double(sweep.conditions(ii).true_norm);
-    n = min(size(pred, 1), size(truth, 1));
+    if ~isequal(size(pred),size(truth))
+        error('plot_vanderpol_neuron_sweep_publication:trajectoryShape', ...
+            'Van der Pol N_hidden=%d prediction and truth shapes differ.',sweep.conditions(ii).n_hidden);
+    end
+    n = size(pred,1);
     if n < 2 || size(pred, 2) < 2 || size(truth, 2) < 2
-        error('plot_lorenz_neuron_sweep_publication:badPhaseData', ...
-            'Lorenz N_hidden=%d has no finite two-dimensional test trajectory.', sweep.conditions(ii).n_hidden);
+        error('plot_vanderpol_neuron_sweep_publication:badPhaseData', ...
+            'Van der Pol N_hidden=%d has no finite two-dimensional test trajectory.', sweep.conditions(ii).n_hidden);
     end
     tfrac = max(eps, min(1, get_opt(opts, 'phase_tfrac', 1)));
     stride = max(1, round(get_opt(opts, 'phase_stride', 1)));
@@ -41,7 +45,7 @@ function fig = plot_phase_figure(sweep, prepared, opts)
 n = numel(sweep.conditions); fig = figure('Color', 'w');
 pos = axes_grid_positions(2, n, get_opt(opts, 'left_margin', .06), get_opt(opts, 'right_margin', .03), ...
     get_opt(opts, 'bottom_margin', .08), get_opt(opts, 'top_margin', .10), get_opt(opts, 'hgap', .025), get_opt(opts, 'vgap', .08), true);
-add_figure_title(fig, get_opt(opts, 'phase_figure_title', 'Lorenz phase portraits'), get_opt(opts, 'figure_title_font_size', 17), pos, 1);
+add_figure_title(fig, get_opt(opts, 'phase_figure_title', 'Van der Pol phase portraits'), get_opt(opts, 'figure_title_font_size', 17), pos, 1);
 limits = phase_limits(prepared);
 for ii = 1:n
     ax = axes(fig, 'Units', 'normalized', 'Position', pos{1, ii});
@@ -56,7 +60,7 @@ end
 function fig = plot_wd_figure(sweep, opts)
 fig = figure('Color', 'w'); ax = axes(fig, 'Position', get_opt(opts, 'single_metric_axes_position', [.12 .16 .80 .72]));
 plot_wd_swarm(ax, sweep, opts);
-title(ax, get_opt(opts, 'wd_figure_title', 'Lorenz phase-portrait Wasserstein distance'), 'FontSize', get_opt(opts, 'figure_title_font_size', 17));
+title(ax, get_opt(opts, 'wd_figure_title', 'Van der Pol phase-portrait Wasserstein distance'), 'FontSize', get_opt(opts, 'figure_title_font_size', 17));
 end
 
 function fig = plot_accuracy_figure(sweep, opts)
@@ -74,8 +78,8 @@ ax_rmse = axes(fig, 'Position', pos{2}); plot_metric_swarm(ax_rmse, sweep, 'rmse
 title(ax_rmse, get_opt(opts, 'rmse_figure_title', 'Yacht RMSE'), 'FontSize', get_opt(opts, 'figure_title_font_size', 17));
 end
 
-function fig = plot_combined_figure(lorenz, prepared, bc, yacht, opts)
-fig = figure('Color', 'w'); n = numel(lorenz.conditions);
+function fig = plot_combined_figure(vanderpol, prepared, bc, yacht, opts)
+fig = figure('Color', 'w'); n = numel(vanderpol.conditions);
 left = get_opt(opts, 'combined_left_margin', .07); right = get_opt(opts, 'combined_right_margin', .03);
 hgap = get_opt(opts, 'combined_hgap', .02); width = (1-left-right-(n-1)*hgap)/n;
 phase_y = get_opt(opts, 'combined_phase_y', .62); phase_h = get_opt(opts, 'combined_phase_height', .27);
@@ -83,9 +87,9 @@ limits = phase_limits(prepared);
 for ii = 1:n
     ax = axes(fig, 'Units', 'normalized', 'Position', [left+(ii-1)*(width+hgap), phase_y, width, phase_h]);
     draw_phase(ax, prepared(ii), limits, opts);
-    title(ax, condition_label(lorenz, ii, opts), 'FontSize', get_opt(opts, 'panel_title_font_size', 14), 'Interpreter', 'none');
+    title(ax, condition_label(vanderpol, ii, opts), 'FontSize', get_opt(opts, 'panel_title_font_size', 14), 'Interpreter', 'none');
 end
-phase_title = get_opt(opts, 'combined_phase_title', 'Lorenz phase portraits');
+phase_title = get_opt(opts, 'combined_phase_title', 'Van der Pol phase portraits');
 if ~isempty(strtrim(char(phase_title)))
     annotation(fig, 'textbox', [.30 phase_y+phase_h+.045 .40 .035], 'String', phase_title, ...
         'Interpreter', 'none', 'FontSize', get_opt(opts, 'combined_phase_title_font_size', 12), ...
@@ -95,7 +99,7 @@ add_figure_title(fig, get_opt(opts, 'combined_figure_title', 'Neuron-count scali
     {[left phase_y width phase_h], [left+(n-1)*(width+hgap) phase_y width phase_h]}, 1);
 
 metric_pos = get_opt(opts, 'combined_metric_axes_positions', {[.09 .34 .36 .20], [.57 .34 .36 .20], [.09 .08 .36 .20], [.57 .08 .36 .20]});
-ax_wd = axes(fig, 'Position', metric_pos{1}); plot_wd_swarm(ax_wd, lorenz, opts); title(ax_wd, get_opt(opts, 'combined_wd_title', 'Lorenz WD'), 'FontSize', get_opt(opts, 'panel_title_font_size', 14));
+ax_wd = axes(fig, 'Position', metric_pos{1}); plot_wd_swarm(ax_wd, vanderpol, opts); title(ax_wd, get_opt(opts, 'combined_wd_title', 'Van der Pol WD'), 'FontSize', get_opt(opts, 'panel_title_font_size', 14));
 ax_acc = axes(fig, 'Position', metric_pos{2}); plot_metric_swarm(ax_acc, bc, 'accuracy', opts); title(ax_acc, get_opt(opts, 'combined_accuracy_title', 'Breast-cancer accuracy'), 'FontSize', get_opt(opts, 'panel_title_font_size', 14));
 ax_r = axes(fig, 'Position', metric_pos{3}); plot_metric_swarm(ax_r, yacht, 'pearson_r', opts); title(ax_r, get_opt(opts, 'combined_pearson_title', 'Yacht Pearson r'), 'FontSize', get_opt(opts, 'panel_title_font_size', 14));
 ax_rmse = axes(fig, 'Position', metric_pos{4}); plot_metric_swarm(ax_rmse, yacht, 'rmse', opts); title(ax_rmse, get_opt(opts, 'combined_rmse_title', 'Yacht RMSE'), 'FontSize', get_opt(opts, 'panel_title_font_size', 14));
@@ -224,4 +228,4 @@ function label = condition_label(sweep, index, opts), labels = condition_labels(
 function set_fixed_outer(ax), if isprop(ax,'ActivePositionProperty'), ax.ActivePositionProperty='Position'; end, if isprop(ax,'PositionConstraint'), ax.PositionConstraint='innerposition'; end, end
 function jitter = deterministic_jitter(n,width), index=(1:n).'; jitter=width*(2*mod(sin(index*12.9898)*43758.5453,1)-1); end
 function value = get_opt(S,name,default_value), if isstruct(S)&&isfield(S,name)&&~isempty(S.(name)), value=S.(name); else, value=default_value; end, end
-function value = required_opt(S,name), if ~isstruct(S)||~isfield(S,name)||isempty(S.(name)), error('plot_lorenz_neuron_sweep_publication:missingSweep','opts.%s is required.',name); end, value=S.(name); end
+function value = required_opt(S,name), if ~isstruct(S)||~isfield(S,name)||isempty(S.(name)), error('plot_vanderpol_neuron_sweep_publication:missingSweep','opts.%s is required.',name); end, value=S.(name); end

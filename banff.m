@@ -103,7 +103,9 @@ cfg.teacher_steps = 30;
 cfg.closed_loop_steps = 55;
 cfg.validate_dynamics_every = 100;
 cfg.validation_time = single(50);
-cfg.validation_warmup_time = single(0);
+% Validation and final testing use the same autonomous warmup protocol so
+% model selection targets the same behaviour that is reported at test time.
+cfg.validation_warmup_time = single(5);
 cfg.test_time = single(50);
 cfg.test_warmup_time = single(5);
 cfg.validation_initial_conditions = 5;
@@ -148,18 +150,18 @@ switch task
         cfg.kind = "dynamics";
         cfg.dataset_file = '';
         cfg.system_rate = single(2);
-        cfg.epochs = 100000;
+        cfg.epochs = 60000;
     case "sprott_s"
         cfg.kind = "dynamics";
         cfg.dataset_file = '';
         cfg.system_rate = single(4);
-        cfg.epochs = 100000;
+        cfg.epochs = 60000;
     case "vanderpol"
         cfg.kind = "dynamics";
         cfg.dataset_file = '';
         cfg.system_rate = single(8);
         cfg.training_window = single(5);
-        cfg.epochs = 100000;
+        cfg.epochs = 60000;
 end
 
 cfg = merge_struct(cfg, overrides);
@@ -186,13 +188,6 @@ if cfg.method == "spsa" && cfg.task == "yacht"
 end
 if cfg.method == "spsa" && cfg.task == "breast_cancer"
     cfg.epochs = value_or_override(overrides, 'epochs', 50000);
-end
-if cfg.method == "spsa" && cfg.task == "vanderpol"
-    cfg.epochs = value_or_override(overrides, 'epochs', 200000);
-end
-if cfg.method == "spsa" && cfg.kind == "dynamics"
-    cfg.validation_warmup_time = value_or_override( ...
-        overrides, 'validation_warmup_time', cfg.test_warmup_time);
 end
 if cfg.training_profile == "neuron_sweep" && cfg.task == "yacht"
     cfg.epochs = value_or_override(overrides, 'epochs', 25000);

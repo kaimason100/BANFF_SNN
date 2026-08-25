@@ -11,7 +11,7 @@ implementations, CUDA files, MEX files, or task-specific training scripts.
 
 ## Start here
 
-The scientific core is eight readable MATLAB files:
+The scientific core and its compatibility manifest are readable MATLAB files:
 
 - `banff.m` — public entry point and all experiment configuration.
 - `banff_train.m` — training loops, checkpointing and progress reporting.
@@ -24,6 +24,8 @@ The scientific core is eight readable MATLAB files:
   dynamical systems.
 - `banff_metrics.m` — classification, regression and phase-portrait metrics.
 - `banff_publication.m` — compact figure-facing export after testing.
+- `banff_provenance.m` — full-source audit metadata and the narrower
+  training-source compatibility boundary.
 
 `run_experiment.m` is a short convenience launcher. `banff_plot.m` is only a
 figure/replay adapter; it calls the readable reference timestep inside
@@ -111,7 +113,7 @@ Other profiles:
 ```matlab
 run_experiment("train", "yacht", "full_rank", 1);
 run_experiment("train", "breast_cancer", "spsa", 1);
-run_experiment("train", "lorenz", "neuron_sweep", 1, ...
+run_experiment("train", "vanderpol", "neuron_sweep", 1, ...
     struct('N_hidden', 8000));
 ```
 
@@ -136,12 +138,14 @@ cfg = banff("config", "lorenz", struct());
 | Abalone | 25,000 |
 | Toyota | 25,000 |
 | Yacht | 25,000 |
-| Lorenz | 100,000 |
-| Sprott S | 100,000 |
-| Van der Pol | 100,000 |
+| Lorenz | 60,000 |
+| Sprott S | 60,000 |
+| Van der Pol | 60,000 |
 
 Supplementary full-rank, SPSA and neuron-sweep overrides are centralised in
 `banff.m` rather than hidden in separate scripts.
+All dynamical-system profiles now default to 60,000 epochs unless an explicit
+`epochs` override is supplied.
 
 The breast-cancer SPSA control is one continuous 50,000-epoch optimisation.
 Its learning-rate and SPSA-perturbation schedules both span all 50,000 epochs;
@@ -173,10 +177,10 @@ time, and raw dataset contents are protected by SHA-256 checks.
 
 Each epoch samples one contiguous normalised target-system window. Inputs use a
 30 ms teacher-forced / 55 ms closed-loop repeating schedule, while supervision
-always remains the next reference state. Validation is fully closed loop and
-selects the bias vector with the lowest phase-portrait sliced-Wasserstein
-score. Final testing uses a 5 s network-only warmup, then starts the matched
-true trajectory from the terminal network output.
+always remains the next reference state. Validation is fully closed loop after
+the same 5 s network-only warmup used for final testing and selects the bias
+vector with the lowest phase-portrait sliced-Wasserstein score. The matched
+true trajectory starts from the terminal network output after that warmup.
 
 For dynamical-system evaluation, `initial_condition_jitter` is the maximum
 absolute per-coordinate perturbation: random initial conditions are sampled
@@ -192,9 +196,13 @@ seed-independent scientific fingerprint, checkpoint fingerprint, MATLAB/GPU
 information, dataset/split metadata and SHA-256 hashes of the scientific core.
 
 Checkpoint continuation is refused if either the checkpoint configuration or
-core source hashes differ. Testing likewise refuses to evaluate a model when
-the mathematical simulator/data/evaluation source differs from the source used
-for training.
+training-source hashes differ. Testing likewise refuses to evaluate a model
+when its training-source signature differs from the source used during
+training. Test orchestration, publication export, Live Scripts and plotting
+code are recorded for provenance but may change after training.
+The compatibility-critical source set is explicitly listed in
+`banff_provenance.m`; changing files outside that set does not invalidate a
+trained result.
 
 ## Tests
 
@@ -258,6 +266,7 @@ BANFF_SNN/
 ├── banff_data.m
 ├── banff_metrics.m
 ├── banff_publication.m
+├── banff_provenance.m
 ├── banff_plot.m
 ├── run_experiment.m
 ├── tests/run_tests.m

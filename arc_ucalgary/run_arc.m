@@ -33,7 +33,7 @@ switch architecture
         options.seed = 1;
         options.method = "spsa";
     case "neuron_sweep"
-        tasks = ["breast_cancer" "yacht" "lorenz"];
+        tasks = ["breast_cancer" "yacht" "vanderpol"];
         counts = [1000 2000 4000 8000 16000];
         task = tasks(floor((job - 1) / numel(counts)) + 1);
         options.N_hidden = counts(mod(job - 1, numel(counts)) + 1);

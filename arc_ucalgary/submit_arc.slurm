@@ -38,6 +38,7 @@ sha256sum banff_eval.m
 sha256sum banff_model.m
 sha256sum banff_data.m
 sha256sum banff_metrics.m
+sha256sum banff_provenance.m
 sha256sum banff_publication.m
 sha256sum run_experiment.m
 sha256sum arc_ucalgary/run_arc.m
