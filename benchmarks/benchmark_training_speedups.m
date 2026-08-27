@@ -506,7 +506,7 @@ fprintf('\nFirst detected numerical divergence by quantity\n');
 disp(numerical_agreement_onset);
 
 %% Plots
-figure('Color', 'w', 'Name', 'BANFF MATLAB-only speed benchmark');
+figure('Color', 'w');
 tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
 nexttile;
 bar(benchmark_results.Speedup);
@@ -524,7 +524,7 @@ ylabel('Maximum relative difference');
 xlabel('Benchmark row');
 title('Numerical agreement (prototype rows may differ by operation ordering)');
 
-figure('Color', 'w', 'Name', 'BANFF large static-batch scaling');
+figure('Color', 'w');
 tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
 nexttile;
 loglog(large_batch_scaling.BatchSize, large_batch_scaling.SamplesPerSecond, ...
@@ -541,7 +541,7 @@ xlabel('Batch size');
 ylabel('Estimated state/temporary memory (MiB)');
 title('Conservative memory scaling');
 
-figure('Color', 'w', 'Name', 'BANFF numerical divergence horizons');
+figure('Color', 'w');
 tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
 nexttile;
 plot_agreement_horizon(numerical_agreement_details, ...

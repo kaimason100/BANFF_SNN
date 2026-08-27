@@ -16,9 +16,22 @@ addpath(root);
 task = canonical_task_local(task);
 options = default_display_options(root, task, displayOptions);
 
-fprintf('\nBANFF held-out evaluation: %s (%s profile)\n', task, profile);
+if ~any(options.assessment_split==["validation","test"])
+    error('banff:evaluationSplit','assessment_split must be validation or test.');
+end
+fprintf('\nBANFF %s evaluation: %s (%s profile)\n', ...
+    lower(assessment_label(options)),task,profile);
 fprintf('Seeds: %s\n\n', mat2str(double(seeds(:).')));
-results = run_experiment("test", task, profile, seeds, overrides);
+if isempty(options.preloaded_results)
+    if options.assessment_split~="test"
+        error('banff:evaluationCompletedValidation', ...
+            ['Completed-model evaluation loads the saved held-out result. ', ...
+             'Validation injection is reserved for the checkpoint evaluator.']);
+    end
+    results=run_experiment("test",task,profile,seeds,overrides);
+else
+    results=options.preloaded_results;
+end
 results = results(:).';
 audit = audit_seed_models(results, seeds);
 
@@ -29,18 +42,28 @@ switch kind
     case "regression"
         seedTable = regression_table(results);
     case "dynamics"
-        seedTable = dynamics_table(results);
+        seedTable = dynamics_table(results,options);
     otherwise
         error('banff:evaluationKind', 'Unsupported task kind "%s".', kind);
 end
 summaryTable = summarise_numeric_columns(seedTable);
 
-fprintf('Per-seed held-out results\n');
+fprintf('Per-seed %s results\n',lower(assessment_label(options)));
 disp(seedTable);
 fprintf('Across-seed mean and sample SD\n');
 disp(summaryTable);
 fprintf('Seed/model audit: PASS (%d distinct requested seeds and model identities).\n\n', ...
     numel(seeds));
+
+if options.run_recurrent_ablation
+    [recurrentAblation,ablationDetails]= ...
+        evaluate_recurrent_ablation(results,kind,options);
+    fprintf('Inference-time recurrent ablation (trained biases retained)\n');
+    disp(recurrentAblation);
+else
+    recurrentAblation = table();
+    ablationDetails=struct([]);
+end
 
 figures = gobjects(0);
 figures(end+1) = plot_summary(seedTable, summaryTable, task, kind, options); %#ok<AGROW>
@@ -54,11 +77,22 @@ else
     figures = [figures, plot_dynamics(results, task, options)]; %#ok<AGROW>
 end
 figures(end+1) = plot_activity(results, task, kind, options); %#ok<AGROW>
+if kind=="dynamics"
+    figures(end+1)=plot_dynamics_current_comparison(results,task,options); %#ok<AGROW>
+end
+if options.run_recurrent_ablation
+    figures=[figures plot_recurrent_ablation( ...
+        recurrentAblation,ablationDetails,task,kind,options)]; %#ok<AGROW>
+end
 
+reportedOptions=options;
+reportedOptions.preloaded_results=[];
 report = struct('task', task, 'kind', kind, 'profile', string(profile), ...
     'seeds', double(seeds(:).'), 'results', results, 'seed_table', seedTable, ...
     'summary_table', summaryTable, 'network_seed_audit', audit, ...
-    'figures', figures(isgraphics(figures)), 'display_options', options);
+    'recurrent_ablation', recurrentAblation, ...
+    'recurrent_ablation_details',ablationDetails, ...
+    'figures', figures(isgraphics(figures)), 'display_options', reportedOptions);
 end
 
 function options = default_display_options(root, task, changes)
@@ -68,10 +102,14 @@ options.output_directory = fullfile(root, 'outputs', 'evaluation', char(task));
 options.representative_seed_index = 1;
 options.representative_initial_condition = 1;
 options.max_bias_points = 2500;
+options.max_current_points = 2500;
 options.max_raster_neurons = 300;
 options.max_image_examples = 16;
 options.max_spike_samples = 8;
 options.replay_static_spikes = true;
+options.run_recurrent_ablation = true;
+options.assessment_split = "test";
+options.preloaded_results = [];
 options.figure_visibility = "on";
 names = fieldnames(changes);
 for index = 1:numel(names)
@@ -79,6 +117,7 @@ for index = 1:numel(names)
 end
 options.representative_seed_index = max(1, round(options.representative_seed_index));
 options.representative_initial_condition = max(1, round(options.representative_initial_condition));
+options.assessment_split=lower(string(options.assessment_split));
 if options.save_figures && exist(options.output_directory, 'dir') ~= 7
     mkdir(options.output_directory);
 end
@@ -123,7 +162,12 @@ end
 sourceHashes = strings(numel(results), 1);
 probeHashes = strings(numel(results), 1);
 for index = 1:numel(results)
-    sourceHashes(index) = hash_struct(results(index).provenance.core_source_sha256);
+    if isfield(results(index).provenance,'training_source_sha256')
+        sourceHashes(index)=hash_struct( ...
+            results(index).provenance.training_source_sha256);
+    else
+        sourceHashes(index)=hash_struct(results(index).provenance.core_source_sha256);
+    end
     probeHashes(index) = fixed_network_probe(results(index).config);
 end
 if numel(unique(sourceHashes)) ~= 1
@@ -203,7 +247,7 @@ T = table(seed, loss, rmse, pearsonR, pearsonP, signedMean, signedStd, active, .
     'SignedErrorMean','SignedErrorStd','ActiveNeuronPercent'});
 end
 
-function T = dynamics_table(results)
+function T = dynamics_table(results,options)
 n = numel(results);
 seed = zeros(n,1); phaseDistance = nan(n,1); bestValidationDistance = nan(n,1);
 initialConditionCount = zeros(n,1);
@@ -214,12 +258,159 @@ for index = 1:n
     initialConditionCount(index) = numel(results(index).test.phase_distance_by_initial_condition);
 end
 T = table(seed, phaseDistance, bestValidationDistance, initialConditionCount, ...
-    'VariableNames', {'Seed','PhaseDistance','BestValidationPhaseDistance','TestInitialConditions'});
+    'VariableNames', {'Seed','PhaseDistance','BestValidationPhaseDistance','InitialConditions'});
+if options.assessment_split=="validation"
+    T.Properties.VariableNames{4}='ValidationInitialConditions';
+else
+    T.Properties.VariableNames{4}='TestInitialConditions';
+end
+end
+
+function [T,details] = evaluate_recurrent_ablation(results,kind,options)
+% Measure the dependence of a trained readout on recurrent synaptic drive.
+% Only the evaluation copy of the fixed recurrent operator is zeroed; the
+% learned biases, encoder, decoder, data split and evaluation protocol are
+% unchanged. Consequently this diagnostic neither retrains nor edits a model.
+n=numel(results);
+seed=zeros(n,1); fullMetric=nan(n,1); ablatedMetric=nan(n,1);
+degradation=nan(n,1); fullLoss=nan(n,1); ablatedLoss=nan(n,1);
+details=repmat(struct('seed',NaN,'full',[],'zero_recurrence',[]),1,n);
+for index=1:n
+    result=results(index);
+    cfg=result.config;
+    seed(index)=double(cfg.seed);
+    details(index).seed=seed(index);
+    if kind=="dynamics"
+        dimension=numel(result.data_information.mean);
+        P=banff_model('create',dimension,dimension,cfg);
+        P.B=single(result.best.B);
+        P=remove_recurrent_operator(P);
+        ablated=banff_eval('closed_loop',banff_model('gpu',P),cfg, ...
+            result.data_information,options.assessment_split,false);
+        fullMetric(index)=double(result.test.phase_distance);
+        ablatedMetric(index)=double(ablated.phase_distance);
+        details(index).full=result.test;
+        details(index).zero_recurrence=ablated;
+    else
+        [data,~]=banff_data('static',cfg,result.data_information);
+        P=banff_model('create',size(data.X_train,1),size(data.Y_train,1),cfg);
+        P.B=single(result.best.B);
+        P=remove_recurrent_operator(P);
+        [assessmentX,assessmentY]=static_assessment_data(data,options.assessment_split);
+        ablated=banff_eval('static',banff_model('gpu',P),assessmentX, ...
+            assessmentY,cfg,true);
+        fullLoss(index)=double(result.test.loss);
+        ablatedLoss(index)=double(ablated.loss);
+        if kind=="classification"
+            fullMetric(index)=double(result.test.statistics.accuracy_percent);
+            ablatedMetric(index)=double(ablated.metric);
+        else
+            statistics=banff_metrics('regression',ablated.output,assessmentY, ...
+                data.target_mean,data.target_std);
+            fullMetric(index)=double(result.test.statistics.rmse);
+            ablatedMetric(index)=double(statistics.rmse);
+        end
+    end
+    if kind=="classification"
+        degradation(index)=fullMetric(index)-ablatedMetric(index);
+    else
+        degradation(index)=ablatedMetric(index)-fullMetric(index);
+    end
+end
+metricName=repmat(primary_metric(kind),n,1);
+T=table(seed,metricName,fullMetric,ablatedMetric,degradation,fullLoss,ablatedLoss, ...
+    'VariableNames',{'Seed','Metric','FullRecurrence','ZeroRecurrence', ...
+    'Degradation','FullLoss','ZeroRecurrenceLoss'});
+end
+
+function P = remove_recurrent_operator(P)
+% Preserve the architecture while making its recurrent current identically zero.
+if P.recurrent_mode=="low_rank"
+    P.recurrentGain=single(0);
+    P.self_coupling(:)=single(0);
+else
+    P.W_recurrent=sparse(P.N_hidden,P.N_hidden);
+end
+end
+
+function figures = plot_recurrent_ablation(T,details,task,kind,options)
+fig=new_figure(options,task+" recurrent ablation");
+tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+nexttile; hold on;
+for index=1:height(T)
+    plot([1 2],[T.FullRecurrence(index) T.ZeroRecurrence(index)],'o-', ...
+        'LineWidth',1.2,'DisplayName',sprintf('Seed %g',T.Seed(index)));
+end
+hold off; grid on; xlim([.7 2.3]);
+set(gca,'XTick',[1 2],'XTickLabel',{'Full recurrence','Zero recurrence'});
+ylabel(display_name(primary_metric(kind))); title("Paired "+lower(assessment_label(options))+" metric");
+legend('Location','best');
+nexttile; bar(T.Seed,T.Degradation); yline(0,'k-'); grid on;
+xlabel('Initialisation seed'); ylabel('Performance degradation');
+if kind=="classification"
+    title('Full minus ablated accuracy (percentage points)');
+else
+    title('Ablated minus full error/distance');
+end
+save_figure(fig,options,'recurrent_ablation.png');
+figures=fig;
+if kind=="dynamics"
+    figures=[figures plot_ablation_phase_portraits(details,task,options)]; %#ok<AGROW>
+end
+end
+
+function figures = plot_ablation_phase_portraits(details,task,options)
+condition=details(min(options.representative_seed_index,numel(details)));
+figures=gobjects(0);
+for ic=1:numel(condition.full.prediction)
+    fullPrediction=double(condition.full.prediction{ic});
+    fullTruth=double(condition.full.truth{ic});
+    zeroPrediction=double(condition.zero_recurrence.prediction{ic});
+    zeroTruth=double(condition.zero_recurrence.truth{ic});
+    if ~isequal(size(fullPrediction),size(fullTruth)) || ...
+            ~isequal(size(zeroPrediction),size(zeroTruth)) || ...
+            size(fullPrediction,2)~=size(zeroPrediction,2)
+        error('banff:evaluationAblationTrajectoryShape', ...
+            'Full and zero-recurrence phase trajectories have inconsistent shapes.');
+    end
+    dimension=size(fullPrediction,2);
+    if dimension<2
+        error('banff:evaluationAblationPhaseDimension', ...
+            'Phase portraits require at least two state dimensions.');
+    end
+    pairs=nchoosek(1:dimension,2);
+    fig=new_figure(options,task+" recurrent-ablation phase portraits");
+    tiledlayout(size(pairs,1),2,'TileSpacing','compact','Padding','compact');
+    for pairIndex=1:size(pairs,1)
+        a=pairs(pairIndex,1); b=pairs(pairIndex,2);
+        limits=phase_limits([fullTruth(:,[a b]);fullPrediction(:,[a b]); ...
+            zeroTruth(:,[a b]);zeroPrediction(:,[a b])]);
+        nexttile; plot(fullTruth(:,a),fullTruth(:,b),'k-','LineWidth',1.1); hold on;
+        plot(fullPrediction(:,a),fullPrediction(:,b),'-','Color',[0 .447 .741], ...
+            'LineWidth',1.1); hold off; axis equal; grid on;
+        xlim(limits(1:2)); ylim(limits(3:4));
+        xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b));
+        title('Full recurrence');
+        if pairIndex==1, legend({'Reference','Network'},'Location','best'); end
+        nexttile; plot(zeroTruth(:,a),zeroTruth(:,b),'k-','LineWidth',1.1); hold on;
+        plot(zeroPrediction(:,a),zeroPrediction(:,b),'-','Color',[.85 .325 .098], ...
+            'LineWidth',1.1); hold off; axis equal; grid on;
+        xlim(limits(1:2)); ylim(limits(3:4));
+        xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b));
+        title('Zero recurrence');
+        if pairIndex==1, legend({'Reference','Network'},'Location','best'); end
+    end
+    sgtitle(sprintf('%s %s recurrent ablation, seed %g, IC %d', ...
+        task_title(task),lower(assessment_label(options)),condition.seed,ic));
+    save_figure(fig,options, ...
+        sprintf('recurrent_ablation_phase_portraits_ic%02d.png',ic));
+    figures(end+1)=fig; %#ok<AGROW>
+end
 end
 
 function S = summarise_numeric_columns(T)
 names = string(T.Properties.VariableNames);
-names(names == "Seed" | names == "TestInitialConditions") = [];
+names(names=="Seed" | endsWith(names,"InitialConditions"))=[];
 metric = strings(numel(names),1); meanValue = nan(numel(names),1);
 sdValue = nan(numel(names),1); finiteN = zeros(numel(names),1);
 for index = 1:numel(names)
@@ -242,7 +433,8 @@ plot(T.Seed, T.(metricName), 'o-', 'LineWidth', 1.4, 'MarkerSize', 7);
 grid on; xlabel('Initialisation seed'); ylabel(display_name(metricName));
 title(display_name(metricName) + " by seed");
 nexttile; axis off;
-lines = [task_title(task) + " held-out test", "", "Across-seed mean +/- sample SD"];
+lines = [task_title(task) + " " + lower(assessment_label(options)), "", ...
+    "Across-seed mean +/- sample SD"];
 for index = 1:height(S)
     lines(end+1) = sprintf('%s: %.6g +/- %.6g (n=%d)', ... %#ok<AGROW>
         display_name(S.Metric(index)), S.Mean(index), S.SampleSD(index), S.FiniteN(index));
@@ -342,7 +534,7 @@ fig = new_figure(options, task + " confusion matrix"); imagesc(confusion); axis 
 colorbar; xlabel('Predicted class'); ylabel('True class'); title(sprintf( ...
     '%s confusion matrix, seed %g', task_title(task), representative.config.seed));
 set(gca,'XTick',1:classCount,'YTick',1:classCount); annotate_matrix(confusion);
-save_figure(fig, options, 'held_out_confusion_matrix.png'); figures(end+1)=fig;
+save_figure(fig, options, assessment_filename(options,'confusion_matrix.png')); figures(end+1)=fig;
 
 logits = double(representative.test.output); shifted = logits-max(logits,[],1);
 probability = exp(shifted)./sum(exp(shifted),1); confidence = max(probability,[],1);
@@ -352,8 +544,9 @@ nexttile; histogram(confidence(predicted==truth),20,'DisplayName','Correct'); ho
 histogram(confidence(predicted~=truth),20,'DisplayName','Incorrect'); hold off;
 xlabel('Maximum softmax probability'); ylabel('Samples'); grid on; legend; title('Prediction confidence');
 nexttile; bar([sum(confusion,2), sum(confusion,1).']); grid on; xlabel('Class');
-ylabel('Samples'); legend({'True','Predicted'},'Location','best'); title('Held-out class counts');
-save_figure(fig, options, 'held_out_classification_details.png'); figures(end+1)=fig;
+ylabel('Samples'); legend({'True','Predicted'},'Location','best');
+title(assessment_label(options)+" class counts");
+save_figure(fig, options, assessment_filename(options,'classification_details.png')); figures(end+1)=fig;
 
 if any(task == ["mnist","afro_mnist_vai"])
     fig = plot_image_examples(representative, task, options);
@@ -365,7 +558,8 @@ function fig = plot_image_examples(result, task, options)
 fig = gobjects(0);
 try
     [data,~] = banff_data('static', result.config, result.data_information);
-    X = double(data.X_test); side = round(sqrt(size(X,1)));
+    [assessmentX,~]=static_assessment_data(data,options.assessment_split);
+    X=double(assessmentX); side = round(sqrt(size(X,1)));
     if side*side ~= size(X,1), return; end
     truth = double(result.test.statistics.true_class(:));
     predicted = double(result.test.statistics.predicted_class(:));
@@ -378,16 +572,19 @@ try
         selection = [selection; remaining(1:min(numel(remaining),count-numel(selection)))];
     end
     columns = ceil(sqrt(numel(selection))); rows = ceil(numel(selection)/columns);
-    fig = new_figure(options, task + " held-out images");
+    fig = new_figure(options, task + " " + lower(assessment_label(options)) + " images");
     tiledlayout(rows,columns,'TileSpacing','compact','Padding','compact');
     for index = 1:numel(selection)
         sample = selection(index); nexttile;
-        imagesc(reshape(X(:,sample),side,side).'); axis image off; colormap(gray);
+        % FLATTEN_IMAGES uses MATLAB column-major vectorisation; RESHAPE alone
+        % restores the stored row/column orientation. A transpose here would
+        % reflect every displayed digit across its diagonal.
+        imagesc(reshape(X(:,sample),side,side)); axis image off; colormap(gray);
         title(sprintf('T:%d P:%d',truth(sample)-1,predicted(sample)-1), ...
             'Color', ternary(truth(sample)==predicted(sample),[0 .5 0],[.8 0 0]));
     end
-    sgtitle(sprintf('%s normalized held-out examples',task_title(task)));
-    save_figure(fig, options, 'held_out_image_examples.png');
+    sgtitle(task_title(task)+" normalized "+lower(assessment_label(options))+" examples");
+    save_figure(fig, options, assessment_filename(options,'image_examples.png'));
 catch exception
     warning('banff:evaluationImagePlot','Image examples were skipped: %s',exception.message);
 end
@@ -397,15 +594,15 @@ function figures = plot_regression(results, task, options)
 figures = gobjects(0); representative = pick_result(results, options);
 S = representative.test.statistics; truth = double(S.truth(:)); prediction = double(S.prediction(:));
 errorValue = prediction-truth;
-fig = new_figure(options, task + " held-out regression");
+fig = new_figure(options, task + " " + lower(assessment_label(options)) + " regression");
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
 nexttile; scatter(truth,prediction,18,'filled','MarkerFaceAlpha',.45); hold on;
 limits = finite_limits([truth;prediction]); plot(limits,limits,'k--','LineWidth',1.2); hold off;
 axis square; xlim(limits); ylim(limits); grid on; xlabel('Truth'); ylabel('Prediction');
-title(sprintf('Held-out predictions, seed %g',representative.config.seed));
+title(sprintf('%s predictions, seed %g',assessment_label(options),representative.config.seed));
 nexttile; scatter(truth,errorValue,18,'filled','MarkerFaceAlpha',.45); yline(0,'k--');
 grid on; xlabel('Truth'); ylabel('Prediction - truth'); title('Residuals versus truth');
-save_figure(fig, options, 'held_out_prediction_and_residuals.png'); figures(end+1)=fig;
+save_figure(fig, options, assessment_filename(options,'prediction_and_residuals.png')); figures(end+1)=fig;
 
 fig = new_figure(options, task + " residual distribution");
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -416,7 +613,7 @@ nexttile; errorbar(1:numel(results), arrayfun(@(R) double(R.test.statistics.sign
 grid on; xlim([.5 numel(results)+.5]); set(gca,'XTick',1:numel(results), ...
     'XTickLabel',arrayfun(@(R) string(R.config.seed),results));
 xlabel('Initialisation seed'); ylabel('Signed error mean +/- SD'); title('Residual summary by seed');
-save_figure(fig, options, 'held_out_residual_distribution.png'); figures(end+1)=fig;
+save_figure(fig, options, assessment_filename(options,'residual_distribution.png')); figures(end+1)=fig;
 end
 
 function figures = plot_dynamics(results, task, options)
@@ -428,7 +625,8 @@ for index=1:numel(results)
     distance(index,1:numel(values))=values;
 end
 fig = new_figure(options, task + " phase distance");
-plot(1:maxIC,distance.','o-','LineWidth',1.2); grid on; xlabel('Held-out initial condition');
+plot(1:maxIC,distance.','o-','LineWidth',1.2); grid on;
+xlabel(assessment_label(options)+" initial condition");
 ylabel('Phase-space distance'); title('Per-initial-condition closed-loop distance');
 legend(arrayfun(@(R) sprintf('Seed %g',R.config.seed),results,'UniformOutput',false),'Location','best');
 save_figure(fig, options, 'phase_distance_by_initial_condition.png'); figures(end+1)=fig;
@@ -450,7 +648,8 @@ for ic=1:numel(representative.test.prediction)
         ylabel(sprintf('x_%d',dimension)); if dimension==1, legend({'True','Network'},'Location','best'); end
         if dimension==size(truth,2), xlabel('Time (s)'); end
     end
-    sgtitle(sprintf('%s closed loop, seed %g, test IC %d',task_title(task),representative.config.seed,ic));
+    sgtitle(sprintf('%s closed loop, seed %g, %s IC %d',task_title(task), ...
+        representative.config.seed,lower(assessment_label(options)),ic));
     save_figure(fig,options,sprintf('trajectory_time_series_ic%02d.png',ic)); figures(end+1)=fig;
     if size(truth,2)>=2
         pairs=nchoosek(1:size(truth,2),2); fig=new_figure(options,sprintf('%s phase IC %d',task,ic));
@@ -462,10 +661,42 @@ for ic=1:numel(representative.test.prediction)
             nexttile; plot(prediction(:,a),prediction(:,b),'r--','LineWidth',1.1); axis equal; grid on;
             xlim(limits(1:2)); ylim(limits(3:4)); xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b)); title('Network');
         end
-        sgtitle(sprintf('%s phase portraits, seed %g, test IC %d',task_title(task),representative.config.seed,ic));
+        sgtitle(sprintf('%s phase portraits, seed %g, %s IC %d',task_title(task), ...
+            representative.config.seed,lower(assessment_label(options)),ic));
         save_figure(fig,options,sprintf('trajectory_phase_portraits_ic%02d.png',ic)); figures(end+1)=fig;
     end
 end
+end
+
+function fig = plot_dynamics_current_comparison(results,task,options)
+% Use the same fixed realization and assessment initial conditions for the
+% initial-bias and selected trained-bias networks. Each plotted datum is one
+% hidden neuron; warmup establishes state but is excluded from the RMS.
+representative=pick_result(results,options);
+cfg=representative.config;
+dimension=numel(representative.data_information.mean);
+untrainedP=banff_model('create',dimension,dimension,cfg);
+trainedP=untrainedP;
+trainedP.B=single(representative.best.B);
+untrainedCurrent=banff_plot('dynamics_current_magnitudes',untrainedP,cfg, ...
+    representative.data_information,options.assessment_split);
+trainedCurrent=banff_plot('dynamics_current_magnitudes',trainedP,cfg, ...
+    representative.data_information,options.assessment_split);
+fprintf('Exact full-%s DS current magnitudes (scored interval; warmup excluded)\n', ...
+    lower(assessment_label(options)));
+disp(current_magnitude_table(untrainedCurrent,trainedCurrent));
+fprintf(['DS current comparison: %d initial conditions and %d scored timesteps ', ...
+    '(%g observations per neuron and condition).\n'], ...
+    trainedCurrent.test_samples,trainedCurrent.timesteps_per_sample, ...
+    trainedCurrent.observations_per_neuron);
+fig=new_figure(options,task+" dynamics current magnitudes");
+tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+nexttile; plot_direct_current_comparison(untrainedCurrent,trainedCurrent,options);
+nexttile; plot_afferent_comparison(untrainedCurrent,trainedCurrent,options);
+nexttile; plot_decoder_comparison(untrainedCurrent,trainedCurrent,options);
+sgtitle(sprintf('%s closed-loop current contributions, seed %g', ...
+    task_title(task),representative.config.seed));
+save_figure(fig,options,'dynamics_current_magnitude_comparison.png');
 end
 
 function fig = plot_activity(results, task, kind, options)
@@ -473,16 +704,17 @@ representative=pick_result(results,options);
 if kind ~= "dynamics"
     rates=double(representative.test.neural_activity.mean_firing_rate_by_neuron_hz(:));
     fig=new_figure(options,task+" spiking activity");
-    tiledlayout(2,3,'TileSpacing','compact','Padding','compact');
+    tiledlayout(2,4,'TileSpacing','compact','Padding','compact');
     nexttile; histogram(rates,50); grid on; xlabel('Mean firing rate (Hz)'); ylabel('Neurons');
-    title(sprintf('Held-out rates; %.2f%% active',representative.test.neural_activity.active_fraction_percent));
+    title(sprintf('%s rates; %.2f%% active',assessment_label(options), ...
+        representative.test.neural_activity.active_fraction_percent));
     if options.replay_static_spikes
         plot_static_diagnostics(representative,options);
     else
         nexttile;
         plot(sort(rates,'descend'),'LineWidth',1.1); xlabel('Ranked neuron'); ylabel('Mean rate (Hz)'); grid on;
         title('Ranked firing rates');
-        for index=1:4, nexttile; axis off; end
+        for index=1:6, nexttile; axis off; end
     end
     save_figure(fig,options,'representative_spiking_diagnostics.png');
 else
@@ -490,7 +722,7 @@ else
     fig=new_figure(options,task+" spiking activity");
     tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
     nexttile; plot_event_raster(events,representative.config,options);
-    [eventRates, eventIsi] = event_statistics(events,representative.config);
+    [eventRates, eventIsi] = event_statistics(events,representative.config,options);
     nexttile; histogram(eventRates,50); grid on; xlabel('Firing rate (Hz)'); ylabel('Active neurons');
     title(sprintf('Event rates; %.2f%% active',100*numel(eventRates)/representative.config.N_hidden));
     nexttile;
@@ -510,10 +742,20 @@ end
 function plot_static_diagnostics(result,options)
 try
     [data,~]=banff_data('static',result.config,result.data_information);
-    P=banff_model('create',size(data.X_train,1),size(data.Y_train,1),result.config);
-    P.B=single(result.best.B);
-    sampleCount=min(options.max_spike_samples,size(data.X_test,2));
-    [spikes,voltage,current]=banff_plot('static_traces',P,data.X_test(:,1:sampleCount),result.config);
+    untrainedP=banff_model('create',size(data.X_train,1),size(data.Y_train,1),result.config);
+    trainedP=untrainedP;
+    trainedP.B=single(result.best.B);
+    [assessmentX,~]=static_assessment_data(data,options.assessment_split);
+    sampleCount=min(options.max_spike_samples,size(assessmentX,2));
+    [spikes,voltage]=banff_plot('static_traces',trainedP, ...
+        assessmentX(:,1:sampleCount),result.config);
+    untrainedCurrent=banff_plot('static_current_magnitudes', ...
+        untrainedP,assessmentX,result.config);
+    trainedCurrent=banff_plot('static_current_magnitudes', ...
+        trainedP,assessmentX,result.config);
+    fprintf('Exact full-%s current magnitudes (RMS over neurons, samples and time)\n', ...
+        lower(assessment_label(options)));
+    disp(current_magnitude_table(untrainedCurrent,trainedCurrent));
     duration=double(result.config.presentation_steps)*double(result.config.dt);
     replayRates=sum(spikes,[2 3])./(sampleCount*duration);
     activeBySample=squeeze(mean(any(spikes,2),1))*100;
@@ -530,7 +772,8 @@ try
         axis off; text(.5,.5,'No spikes in representative sample','HorizontalAlignment','center');
     else
         scatter(step,neuron,7,'k','filled'); set(gca,'YDir','reverse'); grid on;
-        xlabel('Presentation step'); ylabel('Ranked active neuron'); title('Representative held-out spike raster');
+        xlabel('Presentation step'); ylabel('Ranked active neuron');
+        title("Representative "+lower(assessment_label(options))+" spike raster");
     end
     nexttile;
     traceKeep=keep(1:min(20,numel(keep))); plot(double(voltage(traceKeep,:)).','LineWidth',.7); grid on;
@@ -539,17 +782,123 @@ try
     inverseIsiRate=inverse_isi_rate_hz(isi);
     if isempty(inverseIsiRate), axis off; text(.5,.5,'No repeated-neuron spikes','HorizontalAlignment','center');
     else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Instantaneous rate distribution'); end
-    nexttile;
-    t=double(current.time_seconds); plot(t,double(current.mean_encoder_current),'LineWidth',1.1); hold on;
-    plot(t,double(current.mean_recurrent_current),'LineWidth',1.1);
-    plot(t,double(current.mean_bias_current),'LineWidth',1.1);
-    plot(t,double(current.mean_adaptation_current),'LineWidth',1.1); hold off; grid on;
-    xlabel('Time (s)'); ylabel('Population-mean current (mV)'); title('Current components');
-    legend({'Encoder','Recurrent','Bias','Adaptation'},'Location','best');
+    nexttile; plot_direct_current_comparison(untrainedCurrent,trainedCurrent,options);
+    nexttile; plot_afferent_comparison(untrainedCurrent,trainedCurrent,options);
+    nexttile; plot_decoder_comparison(untrainedCurrent,trainedCurrent,options);
+    fprintf(['Current comparison: all %d %s samples and %d presentation steps ', ...
+        '(%g observations per neuron and condition).\n'],trainedCurrent.test_samples, ...
+        lower(assessment_label(options)),trainedCurrent.timesteps_per_sample, ...
+        trainedCurrent.observations_per_neuron);
 catch exception
     warning('banff:evaluationStaticRaster','Static raster replay was skipped: %s',exception.message);
-    for index=1:5, nexttile; axis off; text(.5,.5,'Static replay unavailable','HorizontalAlignment','center'); end
+    for index=1:7, nexttile; axis off; text(.5,.5,'Static replay unavailable','HorizontalAlignment','center'); end
 end
+end
+
+function T = current_magnitude_table(untrained,trained)
+condition=["Untrained";"Trained"];
+summaries={untrained.aggregate;trained.aggregate};
+encoderRmsMv=cellfun(@(S)S.encoder_rms_mV,summaries);
+netRecurrentRmsMv=cellfun(@(S)S.net_recurrent_rms_mV,summaries);
+recurrentToEncoderRms=cellfun(@(S)S.recurrent_to_encoder_rms,summaries);
+grossEncoderRmsMv=cellfun(@(S)S.gross_encoder_rms_mV,summaries);
+grossRecurrentRmsMv=cellfun(@(S)S.gross_recurrent_rms_mV,summaries);
+netToGrossRecurrentRms=cellfun(@(S)S.net_to_gross_recurrent_rms,summaries);
+adaptationRmsMv=cellfun(@(S)S.adaptation_rms_mV,summaries);
+biasDeviationRmsMv=cellfun(@(S)S.bias_deviation_rms_mV,summaries);
+decoderContributionRms=cellfun(@(S)S.decoder_contribution_rms,summaries);
+T=table(condition,encoderRmsMv,netRecurrentRmsMv,recurrentToEncoderRms, ...
+    grossEncoderRmsMv,grossRecurrentRmsMv,netToGrossRecurrentRms, ...
+    adaptationRmsMv,biasDeviationRmsMv,decoderContributionRms, ...
+    'VariableNames',{'Condition','EncoderRmsMv','NetRecurrentRmsMv', ...
+    'RecurrentToEncoderRms','GrossEncoderRmsMv','GrossRecurrentRmsMv', ...
+    'NetToGrossRecurrentRms','AdaptationRmsMv','BiasDeviationRmsMv', ...
+    'DecoderContributionRms'});
+end
+
+function plot_direct_current_comparison(untrained,trained,options)
+% Net encoder and recurrent currents are the signed sums that enter the
+% membrane equation. Adaptation is subtractive; bias is shown relative to the
+% configured initial value. Their common per-neuron RMS definition makes this
+% the primary comparison of dynamical contribution scales.
+biasReference=double(trained.bias_reference_mV);
+fields={'encoder_net_rms','recurrent_net_rms','adaptation_rms','bias_deviation'};
+labels={'Encoder','Net recurrent','Adaptation', ...
+    sprintf('Bias - %.3g mV',biasReference)};
+plot_paired_distribution(untrained,trained,options,fields,labels, ...
+    'Per-neuron RMS contribution (mV)', ...
+    {'Direct membrane-related contribution scale', ...
+    char("RMS over the full "+lower(assessment_label(options))+ ...
+    " set and all presentation timesteps")});
+end
+
+function plot_afferent_comparison(untrained,trained,options)
+% Gross afferent magnitudes retain excitation and inhibition separately until
+% after absolute values are taken, unlike the net membrane current.
+fields={'encoder_gross_afferent_rms','recurrent_gross_afferent_rms'};
+labels={'Encoder gross','Recurrent gross'};
+plot_paired_distribution(untrained,trained,options,fields,labels, ...
+    'Per-neuron RMS gross afferent magnitude (mV)', ...
+    {'Absolute afferent drive before cancellation', ...
+    char("Full "+lower(assessment_label(options))+ ...
+    " set; one datum per postsynaptic neuron")});
+end
+
+function plot_decoder_comparison(untrained,trained,options)
+% Decoder contributions are not membrane currents. Keep their normalized
+% output units on a separate axis rather than making an invalid mV comparison.
+plot_paired_distribution(untrained,trained,options,{'decoder_presynaptic_rms'}, ...
+    {'Hidden to output'},'Per-neuron RMS output contribution', ...
+    {'Presynaptic decoder contributions', ...
+    'Normalized-output units; scored decoder window'});
+end
+
+function plot_paired_distribution(untrained,trained,options,fields,labels,yLabel,titleText)
+% Box charts use every neuron; the visible swarm is deterministically thinned.
+if abs(double(untrained.bias_reference_mV)-double(trained.bias_reference_mV))>1e-6 || ...
+        untrained.test_samples~=trained.test_samples || ...
+        untrained.timesteps_per_sample~=trained.timesteps_per_sample
+    error('banff:evaluationCurrentComparison', ...
+        'Trained and untrained current summaries use inconsistent references or data.');
+end
+conditions={untrained,trained};
+conditionColors={[.50 .50 .50],[0 .4470 .7410]};
+neuronCount=numel(trained.(fields{1}));
+if neuronCount<1 || ~isscalar(options.max_current_points) || ...
+        ~isfinite(options.max_current_points) || options.max_current_points<1
+    error('banff:evaluationCurrentDisplay', ...
+        'Current summaries and max_current_points must be nonempty and valid.');
+end
+swarmCount=min(neuronCount,max(1,round(options.max_current_points)));
+swarmIndex=unique(round(linspace(1,neuronCount,swarmCount)));
+hold on;
+for condition=1:2
+    offset=(condition-1.5)*.34;
+    for index=1:numel(fields)
+        values=double(conditions{condition}.(fields{index})(:));
+        if numel(values)~=neuronCount || any(~isfinite(values)) || any(values<0)
+            error('banff:evaluationCurrentValues', ...
+                'Current summaries must be equally sized, finite and nonnegative.');
+        end
+        position=index+offset;
+        boxchart(repmat(position,neuronCount,1),values, ...
+            'BoxFaceColor',conditionColors{condition},'BoxWidth',.28, ...
+            'MarkerStyle','none');
+        swarmchart(repmat(position,numel(swarmIndex),1),values(swarmIndex),5, ...
+            conditionColors{condition},'filled','XJitter','density', ...
+            'XJitterWidth',.14,'MarkerFaceAlpha',.18,'MarkerEdgeAlpha',.12);
+    end
+end
+h=gobjects(1,2);
+h(1)=plot(nan,nan,'s','MarkerFaceColor',conditionColors{1}, ...
+    'MarkerEdgeColor',conditionColors{1},'DisplayName','Untrained');
+h(2)=plot(nan,nan,'s','MarkerFaceColor',conditionColors{2}, ...
+    'MarkerEdgeColor',conditionColors{2},'DisplayName','Trained');
+hold off; grid on; xlim([.5 numel(fields)+.5]);
+set(gca,'XTick',1:numel(fields),'XTickLabel',labels);
+ylabel(yLabel);
+title(titleText);
+legend(h,'Location','best');
 end
 
 function isi = spike_isi(spikeMatrix,dt)
@@ -569,13 +918,20 @@ isi=isi(isfinite(isi) & isi>0);
 rate=1./isi;
 end
 
-function [rates,isi] = event_statistics(events,cfg)
+function [rates,isi] = event_statistics(events,cfg,options)
 neuron=double(events.neuron(:)); step=double(events.step(:));
-% Report activity only over the scored test interval. Warmup spikes are useful
+% Report activity only over the scored assessment interval. Warmup spikes are useful
 % for trajectory initialization and raster context, but must not contribute to
 % firing rates, active-neuron fractions, or inter-spike intervals.
-warmupSteps=round(double(cfg.test_warmup_time)/double(cfg.dt));
-recordingSteps=round(double(cfg.test_time)/double(cfg.dt));
+if options.assessment_split=="validation"
+    warmup=cfg.validation_warmup_time;
+    duration=cfg.validation_time;
+else
+    warmup=cfg.test_warmup_time;
+    duration=cfg.test_time;
+end
+warmupSteps=round(double(warmup)/double(cfg.dt));
+recordingSteps=round(double(duration)/double(cfg.dt));
 lastRecordingStep=warmupSteps+recordingSteps;
 if any(step < 1 | step > lastRecordingStep)
     error('banff:evaluationEventStep', ...
@@ -607,8 +963,10 @@ function R = pick_result(results,options)
 R=results(min(options.representative_seed_index,numel(results)));
 end
 
-function fig = new_figure(options,name)
-properties={'Color','w','Name',char(name)};
+function fig = new_figure(options,~)
+% Do not set a window Name: Live Scripts identify figures by their visible
+% titles and can capture unnamed visible figures in the inline output panel.
+properties={'Color','w'};
 if ~strcmpi(string(options.figure_visibility),"on")
     % Explicitly hidden figures remain available for headless export. For
     % visible figures, omitting Visible lets the Live Editor capture the figure
@@ -654,6 +1012,35 @@ end
 
 function value = ternary(condition,yes,no)
 if condition, value=yes; else, value=no; end
+end
+
+function label = assessment_label(options)
+if options.assessment_split=="validation"
+    label="Validation";
+else
+    label="Held-out test";
+end
+end
+
+function filename = assessment_filename(options,suffix)
+if options.assessment_split=="validation"
+    prefix='validation_';
+else
+    prefix='held_out_';
+end
+filename=[prefix char(suffix)];
+end
+
+function [X,Y] = static_assessment_data(data,split)
+if split=="validation"
+    X=data.X_validation;
+    Y=data.Y_validation;
+elseif split=="test"
+    X=data.X_test;
+    Y=data.Y_test;
+else
+    error('banff:evaluationSplit','assessment_split must be validation or test.');
+end
 end
 
 function text = task_title(task)

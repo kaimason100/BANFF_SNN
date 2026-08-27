@@ -36,6 +36,7 @@ run(@test_provenance_line_endings, 'cross-platform provenance line endings');
 run(@test_target_integrator_refinement, 'target integrator refinement');
 run(@test_dynamics_burn_in_and_jitter, 'dynamics burn-in and IC jitter conventions');
 if mode == "full"
+    run(@test_assessment_current_magnitudes, 'static and dynamics current magnitudes');
     run(@test_gpu_reference_equivalence, 'shared timestep CPU/GPU agreement');
     run(@test_linear_path_equivalence, 'blocked encoder/averaged decoder agreement');
     run(@test_dynamics_output_elision, 'dynamics output-elision agreement');
@@ -222,6 +223,80 @@ t = linspace(0,2*pi,200).';
 trajectory = [cos(t),sin(t)];
 d = banff_metrics('phase_distance', trajectory, trajectory, options);
 assert(abs(d) < 1e-12);
+end
+
+function test_assessment_current_magnitudes()
+% Verify the streaming assessment aggregation against an analytic encoder
+% magnitude and the model's explicit bias reference. This test is in full
+% mode because the diagnostic deliberately reuses the production GPU step.
+cfg = banff("config", "breast_cancer", struct( ...
+    'N_hidden',8,'N_recurrent',2,'presentation_time',single(.005), ...
+    'batch_size',2,'initial_bias',single(13)));
+P = banff_model('create',3,2,cfg);
+P.B = P.B + single(linspace(-1,1,P.N_hidden).');
+X = single([.2 -.3 .4 .1; -.1 .5 .2 -.4; .3 .1 -.2 .6]);
+summary = banff_plot('static_current_magnitudes',P,X,cfg);
+fields = {'encoder_net_rms','encoder_gross_afferent_rms', ...
+    'recurrent_net_rms','recurrent_gross_afferent_rms', ...
+    'decoder_presynaptic_rms','bias_deviation','adaptation_rms'};
+for index = 1:numel(fields)
+    values = summary.(fields{index});
+    assert(isequal(size(values),[P.N_hidden 1]));
+    assert(all(isfinite(values),'all') && all(values>=0,'all'));
+end
+encoderCurrent = double(P.W_in*(P.inputScale.*X));
+expectedEncoder = sqrt(mean(encoderCurrent.^2,2));
+assert(max(abs(double(summary.encoder_net_rms)-expectedEncoder),[],'all') < 2e-6);
+grossEncoderCurrent = double(abs(P.W_in)) * ...
+    double(P.inputScale.*abs(X));
+expectedGrossEncoder = sqrt(mean(grossEncoderCurrent.^2,2));
+assert(max(abs(double(summary.encoder_gross_afferent_rms)-expectedGrossEncoder), ...
+    [],'all') < 2e-6);
+assert(all(double(summary.encoder_gross_afferent_rms)+2e-6 >= ...
+    double(summary.encoder_net_rms),'all'));
+assert(all(double(summary.recurrent_gross_afferent_rms)+2e-6 >= ...
+    double(summary.recurrent_net_rms),'all'));
+assert(isequal(summary.encoder,summary.encoder_net_rms));
+assert(isequal(summary.recurrent,summary.recurrent_net_rms));
+assert(isequal(summary.encoder_net,summary.encoder_net_rms));
+assert(isequal(summary.recurrent_net,summary.recurrent_net_rms));
+expectedPopulationEncoder=sqrt(mean(expectedEncoder.^2));
+assert(abs(summary.aggregate.encoder_rms_mV-expectedPopulationEncoder)<2e-6);
+assert(abs(summary.aggregate.recurrent_to_encoder_rms- ...
+    summary.aggregate.net_recurrent_rms_mV/ ...
+    summary.aggregate.encoder_rms_mV)<1e-12);
+expectedReference = single(cfg.initial_bias);
+assert(abs(summary.bias_reference_mV-double(expectedReference)) < 1e-6);
+assert(max(abs(double(summary.bias_deviation)- ...
+    abs(double(P.B-expectedReference))),[],'all') < 1e-6);
+assert(summary.test_samples==size(X,2));
+assert(summary.timesteps_per_sample==double(P.presentationSteps));
+assert(summary.observations_per_neuron==size(X,2)*double(P.presentationSteps));
+assert(summary.decoder_window_observations_per_neuron== ...
+    size(X,2)*double(P.averageSteps));
+
+% Exercise the corresponding closed-loop DS aggregation at a tiny size.
+dynamicsCfg=banff("config","lorenz",struct( ...
+    'N_hidden',8,'N_recurrent',2,'long_simulation_time',single(.03), ...
+    'burn_in_time',single(.005),'training_window',single(.005), ...
+    'validation_time',single(.004),'validation_warmup_time',single(.002), ...
+    'validation_initial_conditions',1));
+[~,dynamicsInformation]=banff_data('dynamics',dynamicsCfg);
+dynamicsP=banff_model('create',3,3,dynamicsCfg);
+dynamicsSummary=banff_plot('dynamics_current_magnitudes',dynamicsP, ...
+    dynamicsCfg,dynamicsInformation,"validation");
+for index=1:numel(fields)
+    values=dynamicsSummary.(fields{index});
+    assert(isequal(size(values),[dynamicsP.N_hidden 1]));
+    assert(all(isfinite(values),'all') && all(values>=0,'all'));
+end
+assert(all(double(dynamicsSummary.encoder_gross_afferent_rms)+2e-6>= ...
+    double(dynamicsSummary.encoder_net_rms),'all'));
+assert(all(double(dynamicsSummary.recurrent_gross_afferent_rms)+2e-6>= ...
+    double(dynamicsSummary.recurrent_net_rms),'all'));
+assert(dynamicsSummary.test_samples==1);
+assert(dynamicsSummary.timesteps_per_sample==4);
+assert(dynamicsSummary.observations_per_neuron==4);
 end
 
 function test_gpu_reference_equivalence()
