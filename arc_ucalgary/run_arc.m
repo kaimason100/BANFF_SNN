@@ -44,6 +44,29 @@ switch architecture
             'BANFF_ARCHITECTURE must be low_rank, full_rank, spsa or neuron_sweep.');
 end
 
+% Optional scientific overrides for explicitly submitted learning-rate runs.
+% Require the pair together so a misspelled or omitted variable cannot create
+% an unintended hybrid of an overridden and a default schedule endpoint.
+learningRateStartText = strtrim(getenv('BANFF_LR_START'));
+learningRateEndText = strtrim(getenv('BANFF_LR_END'));
+if xor(isempty(learningRateStartText), isempty(learningRateEndText))
+    error('banff:arcLearningRatePair', ...
+        'BANFF_LR_START and BANFF_LR_END must either both be set or both be absent.');
+end
+if ~isempty(learningRateStartText)
+    learningRateStart = str2double(learningRateStartText);
+    learningRateEnd = str2double(learningRateEndText);
+    if ~isfinite(learningRateStart) || learningRateStart <= 0 || ...
+            ~isfinite(learningRateEnd) || learningRateEnd <= 0
+        error('banff:arcLearningRateValue', ...
+            'BANFF_LR_START and BANFF_LR_END must be finite positive numbers.');
+    end
+    options.learning_rate_start = single(learningRateStart);
+    options.learning_rate_end = single(learningRateEnd);
+    fprintf('ARC learning-rate override: %.9g -> %.9g\n', ...
+        options.learning_rate_start, options.learning_rate_end);
+end
+
 result = banff("train", task, options);
 if ~result.complete
     fprintf(['Checkpoint saved; asking the Slurm wrapper to resubmit this ' ...

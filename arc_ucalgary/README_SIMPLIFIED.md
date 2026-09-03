@@ -35,6 +35,25 @@ BANFF_ARCHITECTURE=spsa sbatch --array=1-3 arc_ucalgary/submit_arc.slurm
 BANFF_ARCHITECTURE=neuron_sweep sbatch --array=1-15 arc_ucalgary/submit_arc.slurm
 ```
 
+The learning-rate schedule endpoints can be overridden for an explicitly
+submitted run by exporting `BANFF_LR_START` and `BANFF_LR_END`. The variables
+must be supplied together and must both be finite positive numbers. For
+example, the following submits the three 32k low-rank Van der Pol seeds with a
+schedule from 0.01 to 0.001:
+
+```bash
+sbatch \
+  --partition=gpu-h100,gpu-a100,gpu-l40 \
+  --array=9,18,27 \
+  --export=ALL,BANFF_LR_START=0.01,BANFF_LR_END=0.001 \
+  arc_ucalgary/submit_arc.slurm
+```
+
+These values are included in the scientific configuration fingerprint, so the
+result and checkpoint filenames do not collide with runs made using the
+default schedule. They are also retained by automatic same-partition
+checkpoint resubmission.
+
 Neuron-sweep items 1-5 are Breast Cancer, 6-10 are Yacht, and 11-15 are
 Van der Pol; within each task the sizes are 1k, 2k, 4k, 8k and 16k neurons.
 
