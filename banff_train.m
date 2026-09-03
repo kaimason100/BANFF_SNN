@@ -7,7 +7,9 @@ function result = banff_train(cfg)
 fprintf('BANFF: %s, %s, %s, eligibility=%s, N=%d, seed=%d\n', ...
     cfg.task, cfg.method, cfg.recurrent_mode, cfg.eligibility_mode, ...
     cfg.N_hidden, cfg.seed);
-if cfg.kind == "dynamics"
+if isfield(cfg,'temporal_task') && logical(cfg.temporal_task)
+    result = train_temporal(cfg);
+elseif cfg.kind == "dynamics"
     result = train_dynamics(cfg);
 else
     result = train_static(cfg);
@@ -18,6 +20,80 @@ if result.complete
     delete_checkpoint_if_present(checkpoint_file(cfg));
     fprintf('Saved %s\n', cfg.model_file);
 end
+end
+
+function result = train_temporal(cfg)
+[data,dataInformation] = banff_data('temporal',cfg);
+fprintf(['Temporal data: train=%d | validation=%d | test=%d | ', ...
+    'inputs=%d | steps=%d | outputs=%d\n'], ...
+    size(data.X_train,3),size(data.X_validation,3),size(data.X_test,3), ...
+    size(data.X_train,1),size(data.X_train,2),size(data.Y_train,1));
+
+P = banff_model('create',size(data.X_train,1),size(data.Y_train,1),cfg);
+P = banff_model('gpu',P);
+data.X_train = gpuArray(data.X_train);
+data.Y_train = gpuArray(data.Y_train);
+data.X_validation = gpuArray(data.X_validation);
+data.Y_validation = gpuArray(data.Y_validation);
+rng(cfg.training_seed,'twister');
+
+history = initialise_static_history(cfg.epochs);
+best = struct('epoch',0,'loss',inf,'metric',-inf,'B',[]);
+[P,history,best,startEpoch] = resume_if_available( ...
+    P,history,best,checkpoint_file(cfg),cfg);
+runTimer = tic;
+for epoch = startEpoch:cfg.epochs
+    learningRate = schedule_value(epoch,cfg.learning_rate_schedule_epochs, ...
+        cfg.learning_rate_start,cfg.learning_rate_end);
+    [P,trainLoss,trainMetric] = temporal_eprop_epoch(P,data,cfg,learningRate);
+    history.train_loss(epoch) = trainLoss;
+    history.train_metric(epoch) = trainMetric;
+    if mod(epoch,cfg.validate_every) == 0
+        validation = banff_eval('temporal',P,data.X_validation, ...
+            data.Y_validation,cfg,false);
+        history.validation_loss(epoch) = validation.loss;
+        history.validation_metric(epoch) = validation.metric;
+        if better_static(validation,best,cfg.kind)
+            best = struct('epoch',epoch,'loss',validation.loss, ...
+                'metric',validation.metric,'B',gather(P.B));
+        end
+    end
+    print_progress(epoch,cfg,history,best,runTimer,startEpoch,learningRate);
+    if toc(runTimer) >= cfg.checkpoint_hours*3600
+        save_checkpoint(checkpoint_file(cfg),P,history,best,epoch,cfg);
+        result = package_result(cfg,dataInformation,history,best,P,false);
+        return;
+    end
+end
+if best.epoch == 0
+    best = struct('epoch',cfg.epochs,'loss',history.train_loss(end), ...
+        'metric',history.train_metric(end),'B',gather(P.B));
+end
+result = package_result(cfg,dataInformation,history,best,P,true);
+end
+
+function [P,lossMean,accuracy] = temporal_eprop_epoch(P,data,cfg,learningRate)
+sampleCount = size(data.X_train,3);
+order = randperm(sampleCount);
+gradient = gpuArray.zeros(P.N_hidden,1,'single');
+lossSum = gpuArray.zeros(1,1,'single');
+correct = gpuArray.zeros(1,1,'single');
+for first = 1:cfg.batch_size:sampleCount
+    indices = order(first:min(sampleCount,first+cfg.batch_size-1));
+    X = data.X_train(:,:,indices);
+    Y = data.Y_train(:,indices);
+    [output,eligibility] = banff_model('temporal',P,X, ...
+        cfg.sequence_response_steps,true,false);
+    [batchLoss,outputGradient,batchCorrect] = ...
+        banff_eval('loss',output,Y,cfg.kind);
+    lossSum = lossSum + batchLoss;
+    correct = correct + batchCorrect;
+    learningSignal = P.W_out.'*outputGradient;
+    gradient = gradient + sum(learningSignal.*eligibility,2);
+end
+P = banff_model('adam',P,gradient,learningRate,sampleCount,cfg);
+lossMean = single(gather(lossSum)/sampleCount);
+accuracy = single(100*gather(correct)/sampleCount);
 end
 
 function result = train_static(cfg)

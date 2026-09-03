@@ -6,12 +6,49 @@ function varargout = banff_eval(action, varargin)
 switch lower(string(action))
     case "static"
         varargout{1} = evaluate_static(varargin{:});
+    case "temporal"
+        varargout{1} = evaluate_temporal(varargin{:});
     case "loss"
         [varargout{1:nargout}] = supervised_loss(varargin{:});
     case "closed_loop"
         varargout{1} = closed_loop_evaluation(varargin{:});
     otherwise
         error('banff:evaluationAction', 'Unknown evaluation action "%s".', action);
+end
+end
+
+function evaluation = evaluate_temporal(P,X,Y,cfg,keepOutput)
+sampleCount = size(X,3);
+lossSum = gpuArray.zeros(1,1,'single');
+correct = gpuArray.zeros(1,1,'single');
+allOutput = zeros(P.N_output,sampleCount,'single');
+spikeCount = gpuArray.zeros(P.N_hidden,1,'single');
+for first = 1:cfg.batch_size:sampleCount
+    indices = first:min(sampleCount,first+cfg.batch_size-1);
+    targets = ensure_gpu(Y(:,indices));
+    [output,~,batchSpikeCount] = banff_model('temporal',P, ...
+        ensure_gpu(X(:,:,indices)),cfg.sequence_response_steps,false,keepOutput);
+    [batchLoss,~,batchCorrect] = supervised_loss(output,targets,cfg.kind);
+    lossSum = lossSum + batchLoss;
+    correct = correct + batchCorrect;
+    if keepOutput
+        allOutput(:,indices) = gather(output);
+        spikeCount = spikeCount + sum(batchSpikeCount,2);
+    end
+end
+evaluation.loss = single(gather(lossSum)/sampleCount);
+evaluation.metric = single(100*gather(correct)/sampleCount);
+if keepOutput
+    evaluation.output = allOutput;
+    duration = single(size(X,2))*P.dt;
+    rates = gather(spikeCount)./single(sampleCount)./duration;
+    active = rates>0;
+    evaluation.neural_activity = struct( ...
+        'mean_firing_rate_by_neuron_hz',single(rates(:)), ...
+        'active_neuron_mask',active(:),'active_fraction',double(mean(active)), ...
+        'active_fraction_percent',100*double(mean(active)), ...
+        'calculation',struct('context','full delayed-cue sequence', ...
+        'rate_units','Hz','n_test_samples',sampleCount));
 end
 end
 

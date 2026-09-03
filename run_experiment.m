@@ -16,6 +16,8 @@ function results = run_experiment(action, task, profile, seeds, overrides)
 %       run_experiment("train","yacht","full_rank",1)
 %       run_experiment("train","breast_cancer","spsa",1)
 %       run_experiment("train","vanderpol","neuron_sweep",1,struct('N_hidden',8000))
+%       run_experiment("train","delayed_cue","main",1:3)
+%       evaluate_delayed_cue_models(1:3)
 %
 %   Each seed is dispatched as an independent complete experiment. This wrapper
 %   performs no learning or simulation itself; it standardises profile overrides

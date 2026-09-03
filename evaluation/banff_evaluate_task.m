@@ -76,9 +76,9 @@ elseif kind == "regression"
 else
     figures = [figures, plot_dynamics(results, task, options)]; %#ok<AGROW>
 end
-figures(end+1) = plot_activity(results, task, kind, options); %#ok<AGROW>
+figures = [figures, plot_activity(results, task, kind, options)]; %#ok<AGROW>
 if kind=="dynamics"
-    figures(end+1)=plot_dynamics_current_comparison(results,task,options); %#ok<AGROW>
+    figures=[figures plot_dynamics_current_comparison(results,task,options)]; %#ok<AGROW>
 end
 if options.run_recurrent_ablation
     figures=[figures plot_recurrent_ablation( ...
@@ -99,7 +99,6 @@ function options = default_display_options(root, task, changes)
 options = struct();
 options.save_figures = false;
 options.output_directory = fullfile(root, 'outputs', 'evaluation', char(task));
-options.representative_seed_index = 1;
 options.representative_initial_condition = 1;
 options.max_bias_points = 2500;
 options.max_current_points = 2500;
@@ -115,7 +114,6 @@ names = fieldnames(changes);
 for index = 1:numel(names)
     options.(names{index}) = changes.(names{index});
 end
-options.representative_seed_index = max(1, round(options.representative_seed_index));
 options.representative_initial_condition = max(1, round(options.representative_initial_condition));
 options.assessment_split=lower(string(options.assessment_split));
 if options.save_figures && exist(options.output_directory, 'dir') ~= 7
@@ -187,6 +185,12 @@ function hash = fixed_network_probe(cfg)
 probeCfg = cfg;
 probeCfg.N_hidden = min(64, double(cfg.N_hidden));
 probeCfg.N_recurrent = min(4, double(cfg.N_recurrent));
+% The probe audits only fixed-weight generation. A full neuron-specific bias
+% vector cannot be reused after deliberately reducing N_hidden, and the bias
+% does not enter the probe hash, so use one valid scalar representative.
+if ~isscalar(probeCfg.initial_bias)
+    probeCfg.initial_bias = probeCfg.initial_bias(1);
+end
 P = banff_model('create', 4, 3, probeCfg);
 values = [single(P.W_in(:)); single(P.W_out(:)); single(P.dale_sign(:))];
 if P.recurrent_mode == "low_rank"
@@ -360,8 +364,9 @@ end
 end
 
 function figures = plot_ablation_phase_portraits(details,task,options)
-condition=details(min(options.representative_seed_index,numel(details)));
 figures=gobjects(0);
+for seedIndex=1:numel(details)
+condition=details(seedIndex);
 for ic=1:numel(condition.full.prediction)
     fullPrediction=double(condition.full.prediction{ic});
     fullTruth=double(condition.full.truth{ic});
@@ -403,8 +408,10 @@ for ic=1:numel(condition.full.prediction)
     sgtitle(sprintf('%s %s recurrent ablation, seed %g, IC %d', ...
         task_title(task),lower(assessment_label(options)),condition.seed,ic));
     save_figure(fig,options, ...
-        sprintf('recurrent_ablation_phase_portraits_ic%02d.png',ic));
+        seed_filename(options,condition.seed, ...
+        sprintf('recurrent_ablation_phase_portraits_ic%02d.png',ic)));
     figures(end+1)=fig; %#ok<AGROW>
+end
 end
 end
 
@@ -526,17 +533,19 @@ title('Learned bias distributions by seed'); save_figure(fig, options, 'learned_
 end
 
 function figures = plot_classification(results, task, options)
-figures = gobjects(0); representative = pick_result(results, options);
-truth = double(representative.test.statistics.true_class(:));
-predicted = double(representative.test.statistics.predicted_class(:));
+figures = gobjects(0);
+for seedIndex=1:numel(results)
+result=results(seedIndex);
+truth = double(result.test.statistics.true_class(:));
+predicted = double(result.test.statistics.predicted_class(:));
 classCount = max([truth; predicted]); confusion = accumarray([truth predicted],1,[classCount classCount]);
 fig = new_figure(options, task + " confusion matrix"); imagesc(confusion); axis image;
 colorbar; xlabel('Predicted class'); ylabel('True class'); title(sprintf( ...
-    '%s confusion matrix, seed %g', task_title(task), representative.config.seed));
+    '%s confusion matrix, seed %g', task_title(task), result.config.seed));
 set(gca,'XTick',1:classCount,'YTick',1:classCount); annotate_matrix(confusion);
-save_figure(fig, options, assessment_filename(options,'confusion_matrix.png')); figures(end+1)=fig;
+save_figure(fig, options, seed_filename(options,result.config.seed,'confusion_matrix.png')); figures(end+1)=fig;
 
-logits = double(representative.test.output); shifted = logits-max(logits,[],1);
+logits = double(result.test.output); shifted = logits-max(logits,[],1);
 probability = exp(shifted)./sum(exp(shifted),1); confidence = max(probability,[],1);
 fig = new_figure(options, task + " classification confidence");
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -545,12 +554,13 @@ histogram(confidence(predicted~=truth),20,'DisplayName','Incorrect'); hold off;
 xlabel('Maximum softmax probability'); ylabel('Samples'); grid on; legend; title('Prediction confidence');
 nexttile; bar([sum(confusion,2), sum(confusion,1).']); grid on; xlabel('Class');
 ylabel('Samples'); legend({'True','Predicted'},'Location','best');
-title(assessment_label(options)+" class counts");
-save_figure(fig, options, assessment_filename(options,'classification_details.png')); figures(end+1)=fig;
+title(sprintf('%s class counts, seed %g',assessment_label(options),result.config.seed));
+save_figure(fig, options, seed_filename(options,result.config.seed,'classification_details.png')); figures(end+1)=fig;
 
 if any(task == ["mnist","afro_mnist_vai"])
-    fig = plot_image_examples(representative, task, options);
+    fig = plot_image_examples(result, task, options);
     if isgraphics(fig), figures(end+1)=fig; end
+end
 end
 end
 
@@ -583,31 +593,42 @@ try
         title(sprintf('T:%d P:%d',truth(sample)-1,predicted(sample)-1), ...
             'Color', ternary(truth(sample)==predicted(sample),[0 .5 0],[.8 0 0]));
     end
-    sgtitle(task_title(task)+" normalized "+lower(assessment_label(options))+" examples");
-    save_figure(fig, options, assessment_filename(options,'image_examples.png'));
+    sgtitle(sprintf('%s normalized %s examples, seed %g',task_title(task), ...
+        lower(assessment_label(options)),result.config.seed));
+    save_figure(fig, options,seed_filename(options,result.config.seed,'image_examples.png'));
 catch exception
     warning('banff:evaluationImagePlot','Image examples were skipped: %s',exception.message);
 end
 end
 
 function figures = plot_regression(results, task, options)
-figures = gobjects(0); representative = pick_result(results, options);
-S = representative.test.statistics; truth = double(S.truth(:)); prediction = double(S.prediction(:));
+figures = gobjects(0);
+for seedIndex=1:numel(results)
+result=results(seedIndex);
+S = result.test.statistics; truth = double(S.truth(:)); prediction = double(S.prediction(:));
 errorValue = prediction-truth;
 fig = new_figure(options, task + " " + lower(assessment_label(options)) + " regression");
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
 nexttile; scatter(truth,prediction,18,'filled','MarkerFaceAlpha',.45); hold on;
 limits = finite_limits([truth;prediction]); plot(limits,limits,'k--','LineWidth',1.2); hold off;
 axis square; xlim(limits); ylim(limits); grid on; xlabel('Truth'); ylabel('Prediction');
-title(sprintf('%s predictions, seed %g',assessment_label(options),representative.config.seed));
+title(sprintf('%s predictions, seed %g',assessment_label(options),result.config.seed));
 nexttile; scatter(truth,errorValue,18,'filled','MarkerFaceAlpha',.45); yline(0,'k--');
 grid on; xlabel('Truth'); ylabel('Prediction - truth'); title('Residuals versus truth');
-save_figure(fig, options, assessment_filename(options,'prediction_and_residuals.png')); figures(end+1)=fig;
+save_figure(fig, options,seed_filename(options,result.config.seed,'prediction_and_residuals.png')); figures(end+1)=fig;
+end
 
 fig = new_figure(options, task + " residual distribution");
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
-nexttile; histogram(errorValue,30); xline(mean(errorValue),'r-','LineWidth',1.4);
-grid on; xlabel('Prediction - truth'); ylabel('Samples'); title('Signed-error distribution');
+nexttile; hold on;
+for seedIndex=1:numel(results)
+    S=results(seedIndex).test.statistics;
+    errorValue=double(S.prediction(:))-double(S.truth(:));
+    histogram(errorValue,30,'DisplayStyle','stairs','LineWidth',1.2, ...
+        'DisplayName',sprintf('Seed %g',results(seedIndex).config.seed));
+end
+hold off; grid on; xlabel('Prediction - truth'); ylabel('Samples');
+title('Signed-error distributions by seed'); legend('Location','best');
 nexttile; errorbar(1:numel(results), arrayfun(@(R) double(R.test.statistics.signed_error_mean),results), ...
     arrayfun(@(R) double(R.test.statistics.signed_error_std),results), 'o','LineWidth',1.3);
 grid on; xlim([.5 numel(results)+.5]); set(gca,'XTick',1:numel(results), ...
@@ -631,59 +652,70 @@ ylabel('Phase-space distance'); title('Per-initial-condition closed-loop distanc
 legend(arrayfun(@(R) sprintf('Seed %g',R.config.seed),results,'UniformOutput',false),'Location','best');
 save_figure(fig, options, 'phase_distance_by_initial_condition.png'); figures(end+1)=fig;
 
-representative = pick_result(results,options);
-for ic=1:numel(representative.test.prediction)
-    prediction=double(representative.test.prediction{ic}); truth=double(representative.test.truth{ic});
-    if ~isequal(size(prediction),size(truth))
-        error('banff:evaluationTrajectoryShape', ...
-            'Saved prediction and truth trajectories have different shapes.');
-    end
-    n=size(prediction,1);
-    time=(0:n-1).'*double(representative.config.dt);
-    fig = new_figure(options, sprintf('%s time series IC %d',task,ic));
-    tiledlayout(size(truth,2),1,'TileSpacing','compact','Padding','compact');
-    for dimension=1:size(truth,2)
-        nexttile; plot(time,truth(:,dimension),'k-','LineWidth',1.2); hold on;
-        plot(time,prediction(:,dimension),'r--','LineWidth',1.1); hold off; grid on;
-        ylabel(sprintf('x_%d',dimension)); if dimension==1, legend({'True','Network'},'Location','best'); end
-        if dimension==size(truth,2), xlabel('Time (s)'); end
-    end
-    sgtitle(sprintf('%s closed loop, seed %g, %s IC %d',task_title(task), ...
-        representative.config.seed,lower(assessment_label(options)),ic));
-    save_figure(fig,options,sprintf('trajectory_time_series_ic%02d.png',ic)); figures(end+1)=fig;
-    if size(truth,2)>=2
-        pairs=nchoosek(1:size(truth,2),2); fig=new_figure(options,sprintf('%s phase IC %d',task,ic));
-        tiledlayout(size(pairs,1),2,'TileSpacing','compact','Padding','compact');
-        for pair=1:size(pairs,1)
-            a=pairs(pair,1); b=pairs(pair,2); limits=phase_limits([truth(:,[a b]);prediction(:,[a b])]);
-            nexttile; plot(truth(:,a),truth(:,b),'k-','LineWidth',1.1); axis equal; grid on;
-            xlim(limits(1:2)); ylim(limits(3:4)); xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b)); title('True');
-            nexttile; plot(prediction(:,a),prediction(:,b),'r--','LineWidth',1.1); axis equal; grid on;
-            xlim(limits(1:2)); ylim(limits(3:4)); xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b)); title('Network');
+for seedIndex=1:numel(results)
+    result=results(seedIndex);
+    for ic=1:numel(result.test.prediction)
+        prediction=double(result.test.prediction{ic}); truth=double(result.test.truth{ic});
+        if ~isequal(size(prediction),size(truth))
+            error('banff:evaluationTrajectoryShape', ...
+                'Saved prediction and truth trajectories have different shapes.');
         end
-        sgtitle(sprintf('%s phase portraits, seed %g, %s IC %d',task_title(task), ...
-            representative.config.seed,lower(assessment_label(options)),ic));
-        save_figure(fig,options,sprintf('trajectory_phase_portraits_ic%02d.png',ic)); figures(end+1)=fig;
+        n=size(prediction,1);
+        time=(0:n-1).'*double(result.config.dt);
+        fig = new_figure(options, sprintf('%s time series IC %d',task,ic));
+        tiledlayout(size(truth,2),1,'TileSpacing','compact','Padding','compact');
+        for dimension=1:size(truth,2)
+            nexttile; plot(time,truth(:,dimension),'k-','LineWidth',1.2); hold on;
+            plot(time,prediction(:,dimension),'r--','LineWidth',1.1); hold off; grid on;
+            ylabel(sprintf('x_%d',dimension));
+            if dimension==1, legend({'True','Network'},'Location','best'); end
+            if dimension==size(truth,2), xlabel('Time (s)'); end
+        end
+        sgtitle(sprintf('%s closed loop, seed %g, %s IC %d',task_title(task), ...
+            result.config.seed,lower(assessment_label(options)),ic));
+        save_figure(fig,options,seed_filename(options,result.config.seed, ...
+            sprintf('trajectory_time_series_ic%02d.png',ic)));
+        figures(end+1)=fig; %#ok<AGROW>
+        if size(truth,2)>=2
+            pairs=nchoosek(1:size(truth,2),2);
+            fig=new_figure(options,sprintf('%s phase IC %d',task,ic));
+            tiledlayout(size(pairs,1),2,'TileSpacing','compact','Padding','compact');
+            for pair=1:size(pairs,1)
+                a=pairs(pair,1); b=pairs(pair,2);
+                limits=phase_limits([truth(:,[a b]);prediction(:,[a b])]);
+                nexttile; plot(truth(:,a),truth(:,b),'k-','LineWidth',1.1); axis equal; grid on;
+                xlim(limits(1:2)); ylim(limits(3:4)); xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b)); title('True');
+                nexttile; plot(prediction(:,a),prediction(:,b),'r--','LineWidth',1.1); axis equal; grid on;
+                xlim(limits(1:2)); ylim(limits(3:4)); xlabel(sprintf('x_%d',a)); ylabel(sprintf('x_%d',b)); title('Network');
+            end
+            sgtitle(sprintf('%s phase portraits, seed %g, %s IC %d',task_title(task), ...
+                result.config.seed,lower(assessment_label(options)),ic));
+            save_figure(fig,options,seed_filename(options,result.config.seed, ...
+                sprintf('trajectory_phase_portraits_ic%02d.png',ic)));
+            figures(end+1)=fig; %#ok<AGROW>
+        end
     end
 end
 end
 
-function fig = plot_dynamics_current_comparison(results,task,options)
+function figures = plot_dynamics_current_comparison(results,task,options)
 % Use the same fixed realization and assessment initial conditions for the
 % initial-bias and selected trained-bias networks. Each plotted datum is one
 % hidden neuron; warmup establishes state but is excluded from the RMS.
-representative=pick_result(results,options);
-cfg=representative.config;
-dimension=numel(representative.data_information.mean);
+figures=gobjects(0);
+for seedIndex=1:numel(results)
+result=results(seedIndex);
+cfg=result.config;
+dimension=numel(result.data_information.mean);
 untrainedP=banff_model('create',dimension,dimension,cfg);
 trainedP=untrainedP;
-trainedP.B=single(representative.best.B);
+trainedP.B=single(result.best.B);
 untrainedCurrent=banff_plot('dynamics_current_magnitudes',untrainedP,cfg, ...
-    representative.data_information,options.assessment_split);
+    result.data_information,options.assessment_split);
 trainedCurrent=banff_plot('dynamics_current_magnitudes',trainedP,cfg, ...
-    representative.data_information,options.assessment_split);
-fprintf('Exact full-%s DS current magnitudes (scored interval; warmup excluded)\n', ...
-    lower(assessment_label(options)));
+    result.data_information,options.assessment_split);
+fprintf('Seed %g exact full-%s DS current magnitudes (scored interval; warmup excluded)\n', ...
+    result.config.seed,lower(assessment_label(options)));
 disp(current_magnitude_table(untrainedCurrent,trainedCurrent));
 fprintf(['DS current comparison: %d initial conditions and %d scored timesteps ', ...
     '(%g observations per neuron and condition).\n'], ...
@@ -695,47 +727,68 @@ nexttile; plot_direct_current_comparison(untrainedCurrent,trainedCurrent,options
 nexttile; plot_afferent_comparison(untrainedCurrent,trainedCurrent,options);
 nexttile; plot_decoder_comparison(untrainedCurrent,trainedCurrent,options);
 sgtitle(sprintf('%s closed-loop current contributions, seed %g', ...
-    task_title(task),representative.config.seed));
-save_figure(fig,options,'dynamics_current_magnitude_comparison.png');
+    task_title(task),result.config.seed));
+save_figure(fig,options,seed_filename(options,result.config.seed, ...
+    'dynamics_current_magnitude_comparison.png'));
+figures(end+1)=fig; %#ok<AGROW>
+end
 end
 
-function fig = plot_activity(results, task, kind, options)
-representative=pick_result(results,options);
+function figures = plot_activity(results, task, kind, options)
+figures=gobjects(0);
+for seedIndex=1:numel(results)
+result=results(seedIndex);
 if kind ~= "dynamics"
-    rates=double(representative.test.neural_activity.mean_firing_rate_by_neuron_hz(:));
+    rates=double(result.test.neural_activity.mean_firing_rate_by_neuron_hz(:));
     fig=new_figure(options,task+" spiking activity");
     tiledlayout(2,4,'TileSpacing','compact','Padding','compact');
     nexttile; histogram(rates,50); grid on; xlabel('Mean firing rate (Hz)'); ylabel('Neurons');
     title(sprintf('%s rates; %.2f%% active',assessment_label(options), ...
-        representative.test.neural_activity.active_fraction_percent));
+        result.test.neural_activity.active_fraction_percent));
     if options.replay_static_spikes
-        plot_static_diagnostics(representative,options);
+        plot_static_diagnostics(result,options);
     else
         nexttile;
         plot(sort(rates,'descend'),'LineWidth',1.1); xlabel('Ranked neuron'); ylabel('Mean rate (Hz)'); grid on;
         title('Ranked firing rates');
         for index=1:6, nexttile; axis off; end
     end
-    save_figure(fig,options,'representative_spiking_diagnostics.png');
+    sgtitle(sprintf('%s spiking diagnostics, seed %g',task_title(task),result.config.seed));
+    save_figure(fig,options,seed_filename(options,result.config.seed,'spiking_diagnostics.png'));
 else
-    events=representative.test.events{min(options.representative_initial_condition,numel(representative.test.events))};
+    events=result.test.events{min(options.representative_initial_condition,numel(result.test.events))};
     fig=new_figure(options,task+" spiking activity");
     tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
-    nexttile; plot_event_raster(events,representative.config,options);
-    [eventRates, eventIsi] = event_statistics(events,representative.config,options);
+    nexttile; plot_event_raster(events,result.config,options);
+    [eventRates, ~] = event_statistics(events,result.config,options);
     nexttile; histogram(eventRates,50); grid on; xlabel('Firing rate (Hz)'); ylabel('Active neurons');
-    title(sprintf('Event rates; %.2f%% active',100*numel(eventRates)/representative.config.N_hidden));
+    title(sprintf('Event rates; %.2f%% active',100*numel(eventRates)/result.config.N_hidden));
     nexttile;
-    inverseIsiRate = inverse_isi_rate_hz(eventIsi);
+    isiByInitialCondition=cell(numel(result.test.events),1);
+    for initialCondition=1:numel(result.test.events)
+        [~,localIsi]=event_statistics( ...
+            result.test.events{initialCondition}, ...
+            result.config,options);
+        isiByInitialCondition{initialCondition}=localIsi(:);
+    end
+    allEventIsi=vertcat(isiByInitialCondition{:});
+    inverseIsiRate = inverse_isi_rate_hz(allEventIsi);
     if isempty(inverseIsiRate), axis off; text(.5,.5,'No repeated-neuron spikes','HorizontalAlignment','center');
-    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Instantaneous rate distribution'); end
+    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title("Full-"+lower(assessment_label(options))+" instantaneous rate distribution"); end
     nexttile; rho=double(events.rho(:)); rho=rho(isfinite(rho));
     if isempty(rho), axis off; text(.5,.5,'No recorded spikes','HorizontalAlignment','center');
     else, histogram(rho,40); grid on; xlabel('\rho at spike'); ylabel('Spikes'); title('Within-step event fraction'); end
-    fprintf('Representative dynamics seed %g: %.2f%% active, %.2f%% silent neurons; %d spikes.\n', ...
-        representative.config.seed,100*numel(eventRates)/representative.config.N_hidden, ...
-        100*(1-numel(eventRates)/representative.config.N_hidden),numel(events.step));
-    save_figure(fig,options,'representative_spiking_diagnostics.png');
+    fprintf('Dynamics seed %g: %.2f%% active, %.2f%% silent neurons; %d spikes.\n', ...
+        result.config.seed,100*numel(eventRates)/result.config.N_hidden, ...
+        100*(1-numel(eventRates)/result.config.N_hidden),numel(events.step));
+    fprintf(['Inverse-ISI distribution pools %d within-trajectory intervals ', ...
+        'from all %d neurons and all %d %s initial conditions.\n'], ...
+        numel(inverseIsiRate),result.config.N_hidden, ...
+        numel(result.test.events),lower(assessment_label(options)));
+    sgtitle(sprintf('%s spiking diagnostics, seed %g',task_title(task),result.config.seed));
+    save_figure(fig,options,seed_filename(options,result.config.seed,'spiking_diagnostics.png'));
+end
+figures(end+1)=fig; %#ok<AGROW>
 end
 end
 
@@ -759,7 +812,7 @@ try
     duration=double(result.config.presentation_steps)*double(result.config.dt);
     replayRates=sum(spikes,[2 3])./(sampleCount*duration);
     activeBySample=squeeze(mean(any(spikes,2),1))*100;
-    fprintf(['Representative static seed %g: %.2f%% active, %.2f%% silent neurons over %d samples; ', ...
+    fprintf(['Static seed %g: %.2f%% active, %.2f%% silent neurons over %d samples; ', ...
         'mean per-sample active fraction %.2f%%.\n'],result.config.seed, ...
         100*mean(replayRates>0),100*mean(replayRates==0),sampleCount,mean(activeBySample));
 
@@ -778,10 +831,14 @@ try
     nexttile;
     traceKeep=keep(1:min(20,numel(keep))); plot(double(voltage(traceKeep,:)).','LineWidth',.7); grid on;
     xlabel('Presentation step'); ylabel('Voltage (mV)'); title('Representative neuron voltages');
-    nexttile; isi=spike_isi(spikes(:,:,1),double(result.config.dt));
-    inverseIsiRate=inverse_isi_rate_hz(isi);
+    nexttile;
+    inverseIsiRate=banff_plot('static_inverse_isi_rates',trainedP, ...
+        assessmentX,result.config);
     if isempty(inverseIsiRate), axis off; text(.5,.5,'No repeated-neuron spikes','HorizontalAlignment','center');
-    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Instantaneous rate distribution'); end
+    else, histogram(inverseIsiRate,50); grid on; xlabel('Inverse ISI (Hz)'); ylabel('Intervals'); title('Full-set instantaneous rate distribution'); end
+    fprintf(['Inverse-ISI distribution pools %d within-sample intervals from ', ...
+        'all %d neurons and all %d %s samples.\n'],numel(inverseIsiRate), ...
+        trainedP.N_hidden,size(assessmentX,2),lower(assessment_label(options)));
     nexttile; plot_direct_current_comparison(untrainedCurrent,trainedCurrent,options);
     nexttile; plot_afferent_comparison(untrainedCurrent,trainedCurrent,options);
     nexttile; plot_decoder_comparison(untrainedCurrent,trainedCurrent,options);
@@ -803,16 +860,19 @@ netRecurrentRmsMv=cellfun(@(S)S.net_recurrent_rms_mV,summaries);
 recurrentToEncoderRms=cellfun(@(S)S.recurrent_to_encoder_rms,summaries);
 grossEncoderRmsMv=cellfun(@(S)S.gross_encoder_rms_mV,summaries);
 grossRecurrentRmsMv=cellfun(@(S)S.gross_recurrent_rms_mV,summaries);
+netToGrossEncoderRms=cellfun(@(S)S.net_to_gross_encoder_rms,summaries);
 netToGrossRecurrentRms=cellfun(@(S)S.net_to_gross_recurrent_rms,summaries);
 adaptationRmsMv=cellfun(@(S)S.adaptation_rms_mV,summaries);
 biasDeviationRmsMv=cellfun(@(S)S.bias_deviation_rms_mV,summaries);
 decoderContributionRms=cellfun(@(S)S.decoder_contribution_rms,summaries);
 T=table(condition,encoderRmsMv,netRecurrentRmsMv,recurrentToEncoderRms, ...
     grossEncoderRmsMv,grossRecurrentRmsMv,netToGrossRecurrentRms, ...
+    netToGrossEncoderRms, ...
     adaptationRmsMv,biasDeviationRmsMv,decoderContributionRms, ...
     'VariableNames',{'Condition','EncoderRmsMv','NetRecurrentRmsMv', ...
     'RecurrentToEncoderRms','GrossEncoderRmsMv','GrossRecurrentRmsMv', ...
-    'NetToGrossRecurrentRms','AdaptationRmsMv','BiasDeviationRmsMv', ...
+    'NetToGrossRecurrentRms','NetToGrossEncoderRms', ...
+    'AdaptationRmsMv','BiasDeviationRmsMv', ...
     'DecoderContributionRms'});
 end
 
@@ -823,8 +883,12 @@ function plot_direct_current_comparison(untrained,trained,options)
 % the primary comparison of dynamical contribution scales.
 biasReference=double(trained.bias_reference_mV);
 fields={'encoder_net_rms','recurrent_net_rms','adaptation_rms','bias_deviation'};
-labels={'Encoder','Net recurrent','Adaptation', ...
-    sprintf('Bias - %.3g mV',biasReference)};
+if isscalar(biasReference)
+    biasLabel=sprintf('Bias - %.3g mV',biasReference);
+else
+    biasLabel='Bias - neuron-specific initial value';
+end
+labels={'Encoder','Net recurrent','Adaptation',biasLabel};
 plot_paired_distribution(untrained,trained,options,fields,labels, ...
     'Per-neuron RMS contribution (mV)', ...
     {'Direct membrane-related contribution scale', ...
@@ -855,7 +919,11 @@ end
 
 function plot_paired_distribution(untrained,trained,options,fields,labels,yLabel,titleText)
 % Box charts use every neuron; the visible swarm is deterministically thinned.
-if abs(double(untrained.bias_reference_mV)-double(trained.bias_reference_mV))>1e-6 || ...
+untrainedReference=double(untrained.bias_reference_mV(:));
+trainedReference=double(trained.bias_reference_mV(:));
+referenceMismatch=numel(untrainedReference)~=numel(trainedReference) || ...
+    any(abs(untrainedReference-trainedReference)>1e-6);
+if referenceMismatch || ...
         untrained.test_samples~=trained.test_samples || ...
         untrained.timesteps_per_sample~=trained.timesteps_per_sample
     error('banff:evaluationCurrentComparison', ...
@@ -901,14 +969,6 @@ title(titleText);
 legend(h,'Location','best');
 end
 
-function isi = spike_isi(spikeMatrix,dt)
-isi=[];
-for neuron=1:size(spikeMatrix,1)
-    times=find(spikeMatrix(neuron,:));
-    if numel(times)>1, isi=[isi,diff(times).*dt]; end %#ok<AGROW>
-end
-end
-
 function rate = inverse_isi_rate_hz(isi)
 % Convert positive inter-spike intervals in seconds to instantaneous rates.
 % The result is an interval-weighted distribution of 1/ISI and is distinct
@@ -920,6 +980,11 @@ end
 
 function [rates,isi] = event_statistics(events,cfg,options)
 neuron=double(events.neuron(:)); step=double(events.step(:));
+rho=double(events.rho(:));
+if numel(rho)~=numel(step) || any(~isfinite(rho)) || any(rho<0 | rho>1)
+    error('banff:evaluationEventRho', ...
+        'Recorded spike event fractions must be finite values in [0,1].');
+end
 % Report activity only over the scored assessment interval. Warmup spikes are useful
 % for trajectory initialization and raster context, but must not contribute to
 % firing rates, active-neuron fractions, or inter-spike intervals.
@@ -939,14 +1004,20 @@ if any(step < 1 | step > lastRecordingStep)
 end
 scored=step>warmupSteps;
 neuron=neuron(scored);
-step=step(scored)-warmupSteps;
+eventTime=(step(scored)-warmupSteps-1+rho(scored)).*double(cfg.dt);
 if isempty(neuron), rates=[]; isi=[]; return; end
 [uniqueNeuron,~,group]=unique(neuron); counts=accumarray(group,1);
-duration=max(1,recordingSteps)*double(cfg.dt); rates=counts./duration; isi=[];
+duration=max(1,recordingSteps)*double(cfg.dt); rates=counts./duration;
+isiByNeuron=cell(numel(uniqueNeuron),1);
 for index=1:numel(uniqueNeuron)
-    times=sort(step(group==index));
-    if numel(times)>1, isi=[isi;diff(times).*double(cfg.dt)]; end %#ok<AGROW>
+    times=sort(eventTime(group==index));
+    if numel(times)>1
+        isiByNeuron{index}=diff(times);
+    else
+        isiByNeuron{index}=zeros(0,1);
+    end
 end
+isi=vertcat(isiByNeuron{:});
 end
 
 function plot_event_raster(events,cfg,options)
@@ -957,10 +1028,6 @@ keep=uniqueNeuron(order(1:min(options.max_raster_neurons,numel(order))));
 selected=ismember(neuron,keep); [~,rank]=ismember(neuron(selected),keep);
 scatter(step(selected).*double(cfg.dt),rank,7,'k','filled'); set(gca,'YDir','reverse'); grid on;
 xlabel('Time (s)'); ylabel('Ranked active neuron'); title('Representative closed-loop spike raster');
-end
-
-function R = pick_result(results,options)
-R=results(min(options.representative_seed_index,numel(results)));
 end
 
 function fig = new_figure(options,~)
@@ -1029,6 +1096,11 @@ else
     prefix='held_out_';
 end
 filename=[prefix char(suffix)];
+end
+
+function filename = seed_filename(options,seed,suffix)
+% Give every seed-resolved export a unique, sortable file name.
+filename=assessment_filename(options,sprintf('seed%03d_%s',round(double(seed)),char(suffix)));
 end
 
 function [X,Y] = static_assessment_data(data,split)

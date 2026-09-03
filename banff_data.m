@@ -8,6 +8,8 @@ switch lower(string(action))
         [varargout{1:nargout}] = load_static_data(varargin{:});
     case "dynamics"
         [varargout{1:nargout}] = make_dynamics_pool(varargin{:});
+    case "temporal"
+        [varargout{1:nargout}] = make_delayed_cue_data(varargin{:});
     case "system"
         varargout{1} = target_system(varargin{:});
     case "trajectory"
@@ -17,6 +19,96 @@ switch lower(string(action))
     otherwise
         error('banff:dataAction', 'Unknown data action "%s".', action);
 end
+end
+
+%% Delayed cue-response temporal classification
+function [data, information] = make_delayed_cue_data(cfg, savedInformation)
+if nargin < 2
+    savedInformation = struct();
+end
+if string(cfg.task) ~= "delayed_cue"
+    error('banff:temporalTask','Temporal data are defined for delayed_cue only.');
+end
+
+totalSteps = double(cfg.sequence_cue_steps + cfg.sequence_delay_steps + ...
+    cfg.sequence_response_steps);
+data.X_train = delayed_cue_split(cfg.sequence_train_samples, ...
+    cfg.split_seed + 101,totalSteps,cfg);
+data.Y_train = delayed_cue_targets(cfg.sequence_train_samples,cfg.split_seed + 101);
+data.X_validation = delayed_cue_split(cfg.sequence_validation_samples, ...
+    cfg.split_seed + 202,totalSteps,cfg);
+data.Y_validation = delayed_cue_targets(cfg.sequence_validation_samples,cfg.split_seed + 202);
+data.X_test = delayed_cue_split(cfg.sequence_test_samples, ...
+    cfg.split_seed + 303,totalSteps,cfg);
+data.Y_test = delayed_cue_targets(cfg.sequence_test_samples,cfg.split_seed + 303);
+
+information = struct('generator','paired_balanced_delayed_cue_v2', ...
+    'input_channels',{{'binary cue','delay distractor','response signal'}}, ...
+    'total_steps',totalSteps,'cue_steps',double(cfg.sequence_cue_steps), ...
+    'delay_steps',double(cfg.sequence_delay_steps), ...
+    'response_steps',double(cfg.sequence_response_steps), ...
+    'distractor_block_steps',double(cfg.sequence_distractor_block_steps), ...
+    'distractor_sd',double(cfg.sequence_distractor_sd), ...
+    'train_samples',double(cfg.sequence_train_samples), ...
+    'validation_samples',double(cfg.sequence_validation_samples), ...
+    'test_samples',double(cfg.sequence_test_samples), ...
+    'split_seed',double(cfg.split_seed));
+if ~isempty(fieldnames(savedInformation))
+    required = {'generator','total_steps','cue_steps','delay_steps', ...
+        'response_steps','distractor_block_steps','distractor_sd', ...
+        'train_samples','validation_samples','test_samples','split_seed'};
+    if ~all(isfield(savedInformation,required))
+        error('banff:temporalProvenance', ...
+            'Saved delayed-cue data information is incomplete.');
+    end
+    for index = 1:numel(required)
+        name = required{index};
+        if ~isequal(savedInformation.(name),information.(name))
+            error('banff:temporalProvenance', ...
+                'Saved delayed-cue generator setting %s does not match.',name);
+        end
+    end
+    information = savedInformation;
+end
+end
+
+function X = delayed_cue_split(sampleCount, seed, totalSteps, cfg)
+[labels,stream,pairIndex] = balanced_labels(sampleCount,seed);
+X = zeros(3,totalSteps,sampleCount,'single');
+cue = single(2 .* (labels - 1) - 1);
+X(1,1:cfg.sequence_cue_steps,:) = repmat(reshape(cue,1,1,[]), ...
+    1,double(cfg.sequence_cue_steps),1);
+
+delayFirst = double(cfg.sequence_cue_steps) + 1;
+delayLast = delayFirst + double(cfg.sequence_delay_steps) - 1;
+block = double(cfg.sequence_distractor_block_steps);
+blockCount = ceil(double(cfg.sequence_delay_steps) / block);
+distractorByPair = single(cfg.sequence_distractor_sd) .* ...
+    single(randn(stream,blockCount,sampleCount/2));
+distractor=distractorByPair(:,pairIndex);
+for index = 1:blockCount
+    first = delayFirst + (index-1)*block;
+    last = min(delayLast,first+block-1);
+    X(2,first:last,:) = repmat(reshape(distractor(index,:),1,1,[]), ...
+        1,last-first+1,1);
+end
+responseFirst = delayLast + 1;
+X(3,responseFirst:totalSteps,:) = single(1);
+end
+
+function Y = delayed_cue_targets(sampleCount, seed)
+labels = balanced_labels(sampleCount,seed);
+Y = zeros(2,sampleCount,'single');
+Y(sub2ind(size(Y),labels,1:sampleCount)) = single(1);
+end
+
+function [labels,stream,pairIndex] = balanced_labels(sampleCount,seed)
+stream = RandStream('mt19937ar','Seed',double(seed));
+labels = mod(0:double(sampleCount)-1,2) + 1;
+pairIndex=ceil((1:double(sampleCount))/2);
+permutation=randperm(stream,double(sampleCount));
+labels = labels(permutation);
+pairIndex=pairIndex(permutation);
 end
 
 %% Static datasets

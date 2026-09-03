@@ -22,12 +22,59 @@ switch lower(string(action))
         [varargout{1:nargout}] = static_traces(varargin{:});
     case "static_current_magnitudes"
         varargout{1} = static_current_magnitudes(varargin{:});
+    case "static_inverse_isi_rates"
+        varargout{1} = static_inverse_isi_rates(varargin{:});
     case "dynamics_current_magnitudes"
         varargout{1} = dynamics_current_magnitudes(varargin{:});
     case "phase_distance"
         varargout{1} = phase_distance(varargin{:});
     otherwise
         error('banff:plot', 'Unknown plotting action "%s".', action);
+end
+end
+
+function inverseRatesHz = static_inverse_isi_rates(P,X,options)
+%STATIC_INVERSE_ISI_RATES Pool all within-sample ISIs across an assessment set.
+% Static samples are independent trials and reset the complete network state.
+% Intervals therefore join consecutive spikes from the same neuron within the
+% same sample, never spikes separated by a sample boundary. Every neuron and
+% sample is included; a neuron with fewer than two spikes in one sample has
+% no mathematically defined ISI for that sample and contributes no interval.
+if ~isa(P.B,'gpuArray'), P=banff_model('gpu',P); end
+sampleCount=size(X,2);
+batchSize=max(1,round(double(field_or(options,'batch_size',256))));
+maximumChunks=ceil(sampleCount/batchSize)*double(P.presentationSteps);
+intervalChunks=cell(maximumChunks,1);
+chunkCount=0;
+for first=1:batchSize:sampleCount
+    indices=first:min(sampleCount,first+batchSize-1);
+    localBatch=numel(indices);
+    inputBatch=gpuArray(single(X(:,indices)));
+    inputCurrent=P.W_in*(P.inputScale.*inputBatch);
+    state=diagnostic_gpu_state(P,localBatch);
+    lastSpikeTimeInSteps=gpuArray.zeros(P.N_hidden,localBatch,'single');
+    hasSpiked=gpuArray.false(P.N_hidden,localBatch);
+    for step=1:P.presentationSteps
+        [state,spike,rho]=banff_model('gpu_step',P,state,inputCurrent,false);
+        eventTimeInSteps=single(step-1)+rho;
+        repeatedSpike=spike & hasSpiked;
+        intervalsInSteps=gather(eventTimeInSteps(repeatedSpike) ...
+            -lastSpikeTimeInSteps(repeatedSpike));
+        if ~isempty(intervalsInSteps)
+            chunkCount=chunkCount+1;
+            intervalChunks{chunkCount}=double(intervalsInSteps(:));
+        end
+        lastSpikeTimeInSteps(spike)=eventTimeInSteps(spike);
+        hasSpiked=hasSpiked|spike;
+    end
+end
+if chunkCount==0
+    inverseRatesHz=zeros(0,1);
+else
+    intervalsInSteps=vertcat(intervalChunks{1:chunkCount});
+    intervalsInSteps=intervalsInSteps( ...
+        isfinite(intervalsInSteps) & intervalsInSteps>0);
+    inverseRatesHz=1./(intervalsInSteps.*double(P.dt));
 end
 end
 
@@ -236,6 +283,9 @@ summary.aggregate=struct( ...
 summary.aggregate.recurrent_to_encoder_rms= ...
     summary.aggregate.net_recurrent_rms_mV/max( ...
     summary.aggregate.encoder_rms_mV,realmin);
+summary.aggregate.net_to_gross_encoder_rms= ...
+    summary.aggregate.encoder_rms_mV/max( ...
+    summary.aggregate.gross_encoder_rms_mV,realmin);
 summary.aggregate.net_to_gross_recurrent_rms= ...
     summary.aggregate.net_recurrent_rms_mV/max( ...
     summary.aggregate.gross_recurrent_rms_mV,realmin);
@@ -355,6 +405,9 @@ summary.aggregate=struct( ...
 summary.aggregate.recurrent_to_encoder_rms= ...
     summary.aggregate.net_recurrent_rms_mV/max( ...
     summary.aggregate.encoder_rms_mV,realmin);
+summary.aggregate.net_to_gross_encoder_rms= ...
+    summary.aggregate.encoder_rms_mV/max( ...
+    summary.aggregate.gross_encoder_rms_mV,realmin);
 summary.aggregate.net_to_gross_recurrent_rms= ...
     summary.aggregate.net_recurrent_rms_mV/max( ...
     summary.aggregate.gross_recurrent_rms_mV,realmin);

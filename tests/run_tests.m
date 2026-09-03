@@ -23,6 +23,8 @@ names = {};
 passed = [];
 messages = {};
 run(@test_default_config, 'default configuration');
+run(@test_initial_bias_vector, 'heterogeneous initial-bias configuration');
+run(@test_delayed_cue_data, 'delayed cue-response construction');
 run(@test_dataset_hashes, 'dataset SHA-256');
 run(@test_static_splits_and_preprocessing, 'static splits/preprocessing');
 run(@test_low_rank_operator, 'low-rank operator and Dale signs');
@@ -41,7 +43,7 @@ if mode == "full"
     run(@test_linear_path_equivalence, 'blocked encoder/averaged decoder agreement');
     run(@test_dynamics_output_elision, 'dynamics output-elision agreement');
     run(@test_checkpoint_restart, 'checkpoint/restart equivalence');
-    run(@test_nine_task_smoke, 'nine-task train/test smoke test');
+    run(@test_ten_task_smoke, 'ten-task train/test smoke test');
     run(@test_alternative_paths, 'surrogate/full-rank/SPSA smoke test');
 end
 
@@ -61,7 +63,13 @@ fprintf('All %d BANFF tests passed (%s mode).\n', height(report), mode);
             messages{end+1} = 'ok'; %#ok<AGROW>
         catch ME
             passed(end+1) = false; %#ok<AGROW>
-            messages{end+1} = sprintf('%s: %s', ME.identifier, ME.message); %#ok<AGROW>
+            if isempty(ME.stack)
+                location = '';
+            else
+                location = sprintf(' (%s:%d)',ME.stack(1).name,ME.stack(1).line);
+            end
+            messages{end+1} = sprintf('%s: %s%s', ...
+                ME.identifier,ME.message,location); %#ok<AGROW>
         end
     end
 end
@@ -88,6 +96,54 @@ assert(spsa.epochs == 50000);
 assert(spsa.spsa_schedule_epochs == 50000);
 assert(spsa.learning_rate_schedule_epochs == 50000);
 assert(~isfield(spsa, 'spsa_continuation_boundary'));
+end
+
+function test_initial_bias_vector()
+% Explicit heterogeneous initialization must be exact and identity-bearing.
+bias = single([18; 19; 21; 22]);
+cfg = banff("config", "breast_cancer", struct( ...
+    'N_hidden', 4, 'N_recurrent', 2, 'initial_bias', bias));
+P = banff_model('create', 3, 2, cfg);
+assert(isequal(P.B, bias));
+uniform = banff("config", "breast_cancer", struct( ...
+    'N_hidden', 4, 'N_recurrent', 2, 'initial_bias', single(20)));
+assert(~strcmp(cfg.scientific_config_sha256, ...
+    uniform.scientific_config_sha256));
+rejected = false;
+try
+    banff("config", "breast_cancer", struct( ...
+        'N_hidden', 4, 'N_recurrent', 2, ...
+        'initial_bias', single([19; 20; 21])));
+catch exception
+    rejected = strcmp(exception.identifier, 'banff:initialBiasSize');
+end
+assert(rejected, 'An incorrectly sized initial-bias vector was accepted.');
+end
+
+function test_delayed_cue_data()
+cfg=banff('config','delayed_cue',struct( ...
+    'N_hidden',16,'N_recurrent',4,'sequence_cue_steps',3, ...
+    'sequence_delay_steps',5,'sequence_response_steps',2, ...
+    'sequence_distractor_block_steps',2,'sequence_train_samples',8, ...
+    'sequence_validation_samples',4,'sequence_test_samples',6));
+[data,information]=banff_data('temporal',cfg);
+assert(isequal(size(data.X_train),[3 10 8]));
+assert(isequal(size(data.Y_train),[2 8]));
+assert(all(sum(data.Y_train,1)==1));
+[~,labels]=max(data.Y_train,[],1);
+expectedCue=single(2.*(labels-1)-1);
+actualCue=squeeze(data.X_train(1,1,:)).';
+assert(isequal(actualCue,expectedCue));
+assert(all(data.X_train(1,4:end,:)==0,'all'));
+assert(all(data.X_train(3,1:8,:)==0,'all'));
+assert(all(data.X_train(3,9:10,:)==1,'all'));
+assert(information.delay_steps==5 && information.response_steps==2);
+delayPatterns=squeeze(data.X_train(2,4:8,:)).';
+assert(size(unique(delayPatterns,'rows'),1)==4);
+[reloaded,reloadedInformation]=banff_data('temporal',cfg,information);
+assert(isequal(data.X_test,reloaded.X_test));
+assert(isequal(data.Y_test,reloaded.Y_test));
+assert(isequal(information,reloadedInformation));
 end
 
 function test_dataset_hashes()
@@ -265,6 +321,9 @@ assert(abs(summary.aggregate.encoder_rms_mV-expectedPopulationEncoder)<2e-6);
 assert(abs(summary.aggregate.recurrent_to_encoder_rms- ...
     summary.aggregate.net_recurrent_rms_mV/ ...
     summary.aggregate.encoder_rms_mV)<1e-12);
+assert(abs(summary.aggregate.net_to_gross_encoder_rms- ...
+    summary.aggregate.encoder_rms_mV/ ...
+    summary.aggregate.gross_encoder_rms_mV)<1e-12);
 expectedReference = single(cfg.initial_bias);
 assert(abs(summary.bias_reference_mV-double(expectedReference)) < 1e-6);
 assert(max(abs(double(summary.bias_deviation)- ...
@@ -274,6 +333,19 @@ assert(summary.timesteps_per_sample==double(P.presentationSteps));
 assert(summary.observations_per_neuron==size(X,2)*double(P.presentationSteps));
 assert(summary.decoder_window_observations_per_neuron== ...
     size(X,2)*double(P.averageSteps));
+
+% Full-set inverse ISIs must equal the union of independently replayed
+% samples. This verifies that every sample is included and that no interval
+% is accidentally constructed across a static-state reset.
+allInverseIsi=banff_plot('static_inverse_isi_rates',P,X,cfg);
+sampleInverseIsi=cell(size(X,2),1);
+for sample=1:size(X,2)
+    sampleInverseIsi{sample}=banff_plot( ...
+        'static_inverse_isi_rates',P,X(:,sample),cfg);
+end
+separateInverseIsi=vertcat(sampleInverseIsi{:});
+assert(isequal(sort(allInverseIsi),sort(separateInverseIsi)));
+assert(all(isfinite(allInverseIsi)) && all(allInverseIsi>0));
 
 % Exercise the corresponding closed-loop DS aggregation at a tiny size.
 dynamicsCfg=banff("config","lorenz",struct( ...
@@ -294,6 +366,17 @@ assert(all(double(dynamicsSummary.encoder_gross_afferent_rms)+2e-6>= ...
     double(dynamicsSummary.encoder_net_rms),'all'));
 assert(all(double(dynamicsSummary.recurrent_gross_afferent_rms)+2e-6>= ...
     double(dynamicsSummary.recurrent_net_rms),'all'));
+% The synthetic dynamics fixture has no external input, so both encoder
+% magnitudes are exactly zero.  The reported diagnostic deliberately uses
+% a protected denominator and should therefore be zero rather than the
+% undefined direct ratio 0/0.
+if dynamicsSummary.aggregate.gross_encoder_rms_mV==0
+    assert(dynamicsSummary.aggregate.net_to_gross_encoder_rms==0);
+else
+    assert(abs(dynamicsSummary.aggregate.net_to_gross_encoder_rms- ...
+        dynamicsSummary.aggregate.encoder_rms_mV/ ...
+        dynamicsSummary.aggregate.gross_encoder_rms_mV)<1e-12);
+end
 assert(dynamicsSummary.test_samples==1);
 assert(dynamicsSummary.timesteps_per_sample==4);
 assert(dynamicsSummary.observations_per_neuron==4);
@@ -363,6 +446,48 @@ assert(~isfield(training,'banff_test_m'));
 assert(~isfield(training,'banff_publication_m'));
 assert(banff_provenance("assert_training_compatible", ...
     struct('training_source_sha256',training)));
+
+% Exact additive transitions preserve older tasks while adding heterogeneous
+% bias initialization and a separate temporal task. Unknown signatures,
+% invalid scalar/vector use, and the new task itself must remain rejected.
+legacy = struct( ...
+    'banff_train_m','fe2c766b0cc005406d4d033f2df3e0f292cab95700f977db9d9235cc616ec627', ...
+    'banff_eval_m','0faf252c04cd0536760d72424795349cfd7fbd056884d16f4a1ca5b2c43c9111', ...
+    'banff_model_m', ...
+    'a98b1dcc3b1fcd2b35e65329fbabdb777e4fd0b1d37e5c7e1613c1a2cf509d84', ...
+    'banff_data_m','e3a742283397c5ceb2cff061abe73f01039cb9ab9b1b2f65ba87fe3deffdc44a', ...
+    'banff_metrics_m','c3f34d81f3e84bd07f423896a27ee4b98c9296e110461e85b10babd5dd9b47c4');
+saved = struct('training_source_sha256',legacy);
+assert(banff_provenance("assert_training_compatible",saved, ...
+    struct('task',"lorenz",'initial_bias',single(20))));
+
+assert_provenance_rejected(saved, ...
+    struct('task',"lorenz",'initial_bias',single([19;21])));
+vectorAware=saved;
+vectorAware.training_source_sha256.banff_model_m= ...
+    '670af95eca96e45aff643536b0273342824373b5a41ccd72917455c8deb8a0af';
+assert(banff_provenance("assert_training_compatible",vectorAware, ...
+    struct('task',"lorenz",'initial_bias',single([19;21]))));
+assert_provenance_rejected(vectorAware, ...
+    struct('task',"delayed_cue",'initial_bias',single(20)));
+unknown = saved;
+unknown.training_source_sha256.banff_model_m = repmat('0',1,64);
+assert_provenance_rejected(unknown, ...
+    struct('task',"lorenz",'initial_bias',single(20)));
+secondMismatch = saved;
+secondMismatch.training_source_sha256.banff_eval_m = repmat('0',1,64);
+assert_provenance_rejected(secondMismatch, ...
+    struct('task',"lorenz",'initial_bias',single(20)));
+end
+
+function assert_provenance_rejected(saved, config)
+rejected = false;
+try
+    banff_provenance("assert_training_compatible",saved,config);
+catch exception
+    rejected = strcmp(exception.identifier,'banff:modelSourceMismatch');
+end
+assert(rejected,'An incompatible training-source signature was accepted.');
 end
 
 function test_provenance_line_endings()
@@ -495,7 +620,7 @@ decoderAveraged = P.W_out * (sum(filteredStates,2) ./ single(7));
 assert(max(abs(double(gather(decoderRepeated-decoderAveraged))),[],'all') < 5e-5);
 end
 
-function test_nine_task_smoke()
+function test_ten_task_smoke()
 % Exercise train/test orchestration for every registered task at minimal size.
 if ~canUseGPU
     warning('BANFF:testNoGPU','Smoke tests skipped because no supported GPU is available.');
@@ -503,7 +628,7 @@ if ~canUseGPU
 end
 root = tempname; mkdir(root); cleanup = onCleanup(@() rmdir(root,'s')); %#ok<NASGU>
 tasks = ["breast_cancer","mnist","afro_mnist_vai","abalone","toyota","yacht", ...
-    "lorenz","sprott_s","vanderpol"];
+    "lorenz","sprott_s","vanderpol","delayed_cue"];
 for task = tasks
     o = struct('N_hidden',16,'N_recurrent',4,'epochs',1,'batch_size',256, ...
         'presentation_time',single(.003),'average_fraction',single(1), ...
@@ -522,6 +647,14 @@ for task = tasks
         o.test_initial_conditions = 1;
         o.phase_metric = struct('projections',16,'trim_fraction',0, ...
             'subsample',1,'transient_fraction',0,'max_points',100);
+    elseif task=="delayed_cue"
+        o.sequence_cue_steps=2;
+        o.sequence_delay_steps=3;
+        o.sequence_response_steps=2;
+        o.sequence_distractor_block_steps=1;
+        o.sequence_train_samples=8;
+        o.sequence_validation_samples=4;
+        o.sequence_test_samples=4;
     end
     R = banff("train",task,o);
     assert(R.complete && all(isfinite(R.final_trainable_state.B)));

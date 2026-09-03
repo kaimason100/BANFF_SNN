@@ -231,7 +231,7 @@ else
     error('banff:checkpointProvenanceMissing', ...
         'Checkpoint has no source-code provenance.');
 end
-banff_provenance('assert_training_compatible',saved);
+banff_provenance('assert_training_compatible',saved,checkpoint.config);
 end
 
 function validate_checkpoint_shapes(checkpoint,file)
@@ -603,7 +603,7 @@ function fig = plot_current_magnitudes(entry,options)
 current=entry.current_magnitudes.current;
 hasBest=~isempty(entry.current_magnitudes.best);
 if hasBest, best=entry.current_magnitudes.best; end
-fig=new_figure(options); tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+fig=new_figure(options); tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
 nexttile;
 labels={'Encoder','Net recurrent','Adaptation','Bias deviation'};
 currentValues=[current.aggregate.encoder_rms_mV,current.aggregate.net_recurrent_rms_mV, ...
@@ -618,16 +618,34 @@ end
 set(gca,'XTick',1:numel(labels),'XTickLabel',labels); grid on;
 ylabel('Global RMS contribution (mV)'); title('Direct contribution scale');
 nexttile;
+afferentLabels={'Encoder gross','Recurrent gross'};
+currentAfferents=[current.aggregate.gross_encoder_rms_mV, ...
+    current.aggregate.gross_recurrent_rms_mV];
+if hasBest
+    bestAfferents=[best.aggregate.gross_encoder_rms_mV, ...
+        best.aggregate.gross_recurrent_rms_mV];
+    bar([currentAfferents;bestAfferents].');
+    legend({'Current','Best'},'Location','best');
+else
+    bar(currentAfferents);
+end
+set(gca,'XTick',1:numel(afferentLabels),'XTickLabel',afferentLabels);
+grid on; ylabel('Global RMS gross afferent magnitude (mV)');
+title('Absolute afferents before cancellation');
+nexttile;
 currentRatio=[current.aggregate.recurrent_to_encoder_rms, ...
+    current.aggregate.net_to_gross_encoder_rms, ...
     current.aggregate.net_to_gross_recurrent_rms];
 if hasBest
     bestRatio=[best.aggregate.recurrent_to_encoder_rms, ...
+        best.aggregate.net_to_gross_encoder_rms, ...
         best.aggregate.net_to_gross_recurrent_rms];
     bar([currentRatio;bestRatio].'); legend({'Current','Best'},'Location','best');
 else
     bar(currentRatio);
 end
-set(gca,'XTick',1:2,'XTickLabel',{'Recurrence / encoder','Net / gross recurrence'});
+set(gca,'XTick',1:3,'XTickLabel',{'Recurrence / encoder', ...
+    'Net / gross encoder','Net / gross recurrence'});
 grid on; ylabel('RMS ratio'); title('Balance and cancellation');
 sgtitle(sprintf('Validation current magnitudes, seed %d',entry.config.seed));
 save_figure(fig,options,sprintf('seed%03d_validation_currents.png',entry.config.seed));

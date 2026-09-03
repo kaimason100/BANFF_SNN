@@ -162,6 +162,27 @@ switch task
         cfg.system_rate = single(8);
         cfg.training_window = single(5);
         cfg.epochs = 60000;
+    case "delayed_cue"
+        % Binary delayed cue-response task. The cue is absent during the
+        % response window, so instantaneous feedforward input cannot identify
+        % the class. The standard network is retained without task-specific
+        % connectivity; recurrent necessity is assessed by held-out ablation.
+        cfg.kind = "classification";
+        cfg.dataset_file = '';
+        cfg.temporal_task = true;
+        % Network size, rank, gains and neuron parameters are inherited
+        % unchanged from the main profile; only the temporal protocol differs.
+        cfg.sequence_cue_steps = 300;
+        cfg.sequence_delay_steps = 150;
+        cfg.sequence_response_steps = 300;
+        cfg.sequence_distractor_block_steps = 10;
+        cfg.sequence_distractor_sd = single(0);
+        cfg.sequence_train_samples = 512;
+        cfg.sequence_validation_samples = 128;
+        cfg.sequence_test_samples = 256;
+        cfg.batch_size = 64;
+        cfg.validate_every = 10;
+        cfg.epochs = 2000;
 end
 
 cfg = merge_struct(cfg, overrides);
@@ -260,9 +281,14 @@ if cfg.tau_synapse_rise >= cfg.tau_synapse_decay
     error('banff:synapseTimeConstants', 'tau_synapse_rise must be smaller than tau_synapse_decay.');
 end
 
-voltages = [cfg.resting_voltage cfg.threshold_voltage cfg.reset_voltage cfg.initial_bias];
-if any(~isfinite(double(voltages)))
+voltages = [cfg.resting_voltage cfg.threshold_voltage cfg.reset_voltage];
+initialBias = double(cfg.initial_bias(:));
+if any(~isfinite(double(voltages))) || any(~isfinite(initialBias))
     error('banff:voltageFinite', 'Voltage parameters and initial_bias must be finite.');
+end
+if ~(isscalar(initialBias) || numel(initialBias) == cfg.N_hidden)
+    error('banff:initialBiasSize', ...
+        'initial_bias must be scalar or contain exactly N_hidden values.');
 end
 if cfg.threshold_voltage <= cfg.resting_voltage || cfg.reset_voltage >= cfg.threshold_voltage
     error('banff:voltageScale', ...
@@ -313,6 +339,39 @@ for i = 1:numel(nonnegativeDurations)
 end
 if cfg.kind == "dynamics" && (~isfield(cfg,'system_rate') || ~isfinite(double(cfg.system_rate)) || cfg.system_rate <= 0)
     error('banff:systemRate', 'Dynamical-system tasks require a positive finite system_rate.');
+end
+if isfield(cfg,'temporal_task') && logical(cfg.temporal_task)
+    if cfg.method ~= "eprop"
+        error('banff:temporalMethod', ...
+            'The delayed-cue task currently supports e-prop only.');
+    end
+    temporalIntegers = {'sequence_cue_steps','sequence_delay_steps', ...
+        'sequence_response_steps','sequence_distractor_block_steps', ...
+        'sequence_train_samples','sequence_validation_samples', ...
+        'sequence_test_samples'};
+    for index = 1:numel(temporalIntegers)
+        name = temporalIntegers{index};
+        value = double(cfg.(name));
+        if ~isscalar(value) || ~isfinite(value) || value < 1 || value ~= round(value)
+            error('banff:temporalPositiveInteger', ...
+                '%s must be a positive integer.',name);
+        end
+    end
+    sampleFields={'sequence_train_samples','sequence_validation_samples', ...
+        'sequence_test_samples'};
+    for index=1:numel(sampleFields)
+        if mod(double(cfg.(sampleFields{index})),2)~=0
+            error('banff:temporalBalancedPairs', ...
+                '%s must be even so opposite cues share matched distractors.', ...
+                sampleFields{index});
+        end
+    end
+    if ~isscalar(cfg.sequence_distractor_sd) || ...
+            ~isfinite(double(cfg.sequence_distractor_sd)) || ...
+            cfg.sequence_distractor_sd < 0
+        error('banff:temporalDistractor', ...
+            'sequence_distractor_sd must be non-negative and finite.');
+    end
 end
 if cfg.recurrent_mode == "low_rank" && cfg.N_recurrent > cfg.N_hidden
     error('banff:recurrentRank', 'N_recurrent cannot exceed N_hidden in low-rank mode.');
@@ -366,9 +425,11 @@ switch task
         task = "toyota";
     case {"sprott", "sprotts"}
         task = "sprott_s";
+    case {"delay", "delayed", "delayed_response", "delayed_cue_response"}
+        task = "delayed_cue";
 end
 valid = ["breast_cancer","mnist","afro_mnist_vai","abalone", ...
-    "toyota","yacht","lorenz","sprott_s","vanderpol"];
+    "toyota","yacht","lorenz","sprott_s","vanderpol","delayed_cue"];
 if ~any(task == valid)
     error('banff:task', 'Unknown task "%s".', task);
 end

@@ -9,8 +9,15 @@ if ~isfield(trained, 'provenance')
     error('banff:modelProvenanceMissing', ...
         'The trained result does not contain source-code provenance. Retrain with this release.');
 end
-banff_provenance("assert_training_compatible", trained.provenance);
-if cfg.kind == "dynamics"
+banff_provenance("assert_training_compatible", trained.provenance, cfg);
+if isfield(cfg,'temporal_task') && logical(cfg.temporal_task)
+    [data,~] = banff_data('temporal',cfg,trained.data_information);
+    P = banff_model('gpu',banff_model('create', ...
+        size(data.X_train,1),size(data.Y_train,1),cfg));
+    P.B = gpuArray(single(trained.best.B));
+    test = banff_eval('temporal',P,data.X_test,data.Y_test,cfg,true);
+    test.statistics = banff_metrics('classification',test.output,data.Y_test);
+elseif cfg.kind == "dynamics"
     dimension = numel(trained.data_information.mean);
     P = banff_model('gpu', banff_model('create', dimension, dimension, cfg));
     P.B = gpuArray(single(trained.best.B));

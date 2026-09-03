@@ -12,6 +12,8 @@ switch lower(string(action))
         varargout{1} = move_to_gpu(varargin{:});
     case "static"
         [varargout{1:nargout}] = simulate_static(varargin{:});
+    case "temporal"
+        [varargout{1:nargout}] = simulate_temporal(varargin{:});
     case "dynamics"
         [varargout{1:nargout}] = simulate_dynamics(varargin{:});
     case "adam"
@@ -25,6 +27,62 @@ switch lower(string(action))
     otherwise
         error('banff:modelAction', 'Unknown model action "%s".', action);
 end
+end
+
+%% Time-varying temporal classification simulation
+function [averageOutput, averageEligibility, spikeCount, outputTrace] = ...
+        simulate_temporal(P,inputSequence,responseSteps,trackEligibility,recordSpikes)
+inputSequence = gpuArray(single(inputSequence));
+responseSteps = double(responseSteps);
+trackEligibilityHost = logical(trackEligibility);
+trackEligibilityGpu = gpuArray(trackEligibilityHost);
+recordSpikes = logical(recordSpikes);
+if ndims(inputSequence) ~= 3 || size(inputSequence,1) ~= P.N_input
+    error('banff:temporalInputShape', ...
+        'Temporal input must have shape N_input-by-time-by-samples.');
+end
+totalSteps = size(inputSequence,2);
+batchSize = size(inputSequence,3);
+if responseSteps < 1 || responseSteps > totalSteps || responseSteps ~= round(responseSteps)
+    error('banff:temporalResponseWindow','The temporal response window is invalid.');
+end
+responseFirst = totalSteps-responseSteps+1;
+state = initial_state(P,batchSize);
+biasCurrent = repmat(P.B,1,batchSize);
+filteredStateSum = gpuArray.zeros(P.N_hidden,batchSize,'single');
+eligibilitySum = gpuArray.zeros(P.N_hidden,batchSize,'single');
+spikeCount = gpuArray.zeros(P.N_hidden,batchSize,'single');
+storeTrace = nargout >= 4;
+if storeTrace
+    outputTrace = gpuArray.zeros(P.N_output,totalSteps,batchSize,'single');
+else
+    outputTrace = gpuArray.zeros(P.N_output,0,0,'single');
+end
+
+for step = 1:totalSteps
+    inputAtStep = reshape(inputSequence(:,step,:),P.N_input,batchSize);
+    inputCurrent = P.W_in * (P.inputScale .* inputAtStep);
+    recurrentCurrent = recurrent_current(P,state.r);
+    if recordSpikes
+        [state,spike] = fused_step(P,state,inputCurrent,recurrentCurrent, ...
+            biasCurrent,trackEligibilityGpu,true);
+        spikeCount = spikeCount + single(spike);
+    else
+        state = fused_step(P,state,inputCurrent,recurrentCurrent, ...
+            biasCurrent,trackEligibilityGpu,false);
+    end
+    if storeTrace
+        outputTrace(:,step,:) = reshape(P.W_out*state.r,P.N_output,1,batchSize);
+    end
+    if step >= responseFirst
+        filteredStateSum = filteredStateSum + state.r;
+        if trackEligibilityHost
+            eligibilitySum = eligibilitySum + state.eligibilityDecay;
+        end
+    end
+end
+averageOutput = P.W_out * (filteredStateSum ./ single(responseSteps));
+averageEligibility = eligibilitySum ./ single(responseSteps);
 end
 
 %% Model construction
@@ -81,7 +139,18 @@ values = index_uniform(61, 1:nOutput, 1:nHidden, decoderSeed);
 P.W_out = cfg.decoder_gain .* sqrt(single(3)) ...
     .* single(single(2) .* single(values) - single(1)) ./ sqrt(single(nHidden));
 
-P.B = repmat(single(cfg.initial_bias), nHidden, 1);
+initialBias = single(cfg.initial_bias(:));
+if isscalar(initialBias)
+    P.B = repmat(initialBias, nHidden, 1);
+elseif numel(initialBias) == nHidden
+    % Explicit heterogeneous initialization is used by controlled
+    % initialization experiments. The vector is part of the scientific
+    % configuration hash, so it cannot be confused with uniform training.
+    P.B = reshape(initialBias, nHidden, 1);
+else
+    error('banff:modelInitialBiasSize', ...
+        'initial_bias must be scalar or contain exactly N_hidden values.');
+end
 P.m = zeros(nHidden, 1, 'single');
 P.v = zeros(nHidden, 1, 'single');
 P.vMax = zeros(nHidden, 1, 'single');
